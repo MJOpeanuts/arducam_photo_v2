@@ -131,6 +131,10 @@ L’API OpenCV DirectShow est sélectionnée explicitement sous Windows, sans re
 et option RAW sont configurées, puis chaque image reçue est validée en type,
 forme et nombre d’octets. Une configuration acceptée par le pilote ne suffit
 pas. Une image non conforme ou un mode refusé produit une erreur visible.
+Largeur et hauteur sont relues après l’ensemble des commandes du mode,
+avant la stabilisation. Ces valeurs rapportées par le pilote peuvent encore
+différer des dimensions reçues : elles sont diagnostiques, et ne remplacent
+jamais la validation des pixels effectivement acquis.
 
 Au déclenchement : la banque est figée, sa caméra est retrouvée, ouverte et
 configurée, le Focus manuel est appliqué, puis une stabilisation bornée lit au plus
@@ -162,6 +166,50 @@ disponibles, les durées, traitements et erreurs. Le rendu RAW de référence
 applique le niveau noir 16, le dématriçage BayerGR2RGB et la correction couleur
 4000 K. En cas d’échec du rendu, l’original et le manifeste restent présents.
 Les noms sont uniques et les fichiers ne sont jamais remplacés.
+
+Après une capture réussie, le rendu apparaît automatiquement dans Capture,
+sans changement d’onglet ni réouverture de la caméra. Le dossier de sortie
+est résolu en chemin absolu au démarrage du worker ; les chemins
+`original.path` et `render.path` du manifeste restent relatifs à leur dossier
+de capture, jamais au répertoire de travail. La lecture des octets via Python
+puis le décodage OpenCV prennent en charge les chemins Unicode.
+Le worker transmet au thread graphique une image Qt autonome,
+réduite à 1600 px maximum pour l’affichage uniquement. Les proportions sont
+conservées, sans recadrage, et l’image s’adapte au redimensionnement.
+La dernière photo affichée reste visible jusqu’au prochain résultat affichable.
+Si le rendu ou son affichage échoue après sauvegarde, le message
+« Photo enregistrée, affichage indisponible » apparaît avec le détail dans
+Diagnostic ; les boutons d’ouverture de la photo (ou de l’original RAW si le
+rendu manque) et du dossier restent disponibles. Aucune nouvelle prise
+ni erreur d’acquisition n’est déclenchée pour cet échec d’affichage.
+Diagnostic distingue sauvegarde, chargement et installation dans le widget,
+avec leurs erreurs ; ces détails ne surchargent pas le statut principal.
+
+Cause démontrée dans l’ancien code : un échec de `cv2.imread()` produisait
+un résultat sauvegardé sans image d’affichage ni diagnostic. Le déclencheur
+exact de l’incident Windows en couleur 12 MP (4000 × 3000) reste à confirmer
+sur le PC : le traitement des chemins Unicode est une hypothèse, pas une
+cause matérielle démontrée. La limite du lecteur PNG Qt concerne les grands
+rendus, notamment le 108 MP ; elle n’explique pas l’incident 12 MP.
+
+Ce n’est pas un décodage à faible consommation mémoire : OpenCV décode
+l’image entière avant réduction (324 Mo de pixels BGR pour 108 MP, hors
+buffers temporaires). Les pixels acquis sont libérés après archivage, avant
+ce chargement ; les octets compressés et le tableau décodé ne sont pas
+conservés après création de l’image d’affichage. Une capture en cours bloque
+les déclenchements suivants jusqu’à la fin du worker, donc leurs chargements
+ne s’accumulent pas. La copie Qt est nécessaire pour détacher le petit buffer
+d’affichage de NumPy.
+
+Mesure Linux/Python 3.12 en processus séparés, cinq chargements consécutifs
+d’un PNG synthétique uniforme, en conservant le dernier résultat :
+12 MP, RSS initiale 79,9 Mio, pic 168,2 Mio, RSS après chargements
+88,7 / 94,0 / 99,4 / 99,5 / 99,5 Mio ; 108 MP, RSS initiale 80,1 Mio,
+pic 717,8 Mio, puis 89,0 / 94,3 / 99,7 / 99,8 / 99,8 Mio.
+Après libération du résultat : 83,2 et 83,5 Mio respectivement.
+Ces mesures concernent uniquement le chargement, pas l’acquisition ni
+le dématriçage ; la compression du fichier, l’allocateur et Windows peuvent
+changer les pics. Il reste à mesurer une séquence réelle sur le PC.
 
 ## Traitement hors caméra
 
@@ -202,6 +250,16 @@ Les tests s’exécutent sous Linux (Python 3.12, `QT_QPA_PLATFORM=offscreen`)
 avec une caméra et un énumérateur factices. Ils couvrent aussi la disponibilité
 des backends, la résolution des index, les échecs terminaux et la relance manuelle.
 Ils ne remplacent pas les essais Windows/Arducam.
+Le transfert worker → interface est testé dans les quatre modes avec des
+acquisitions synthétiques (12 MP aux dimensions réelles, autres modes réduits),
+un archivage et un décodage réels, des chemins relatifs avec espaces/accents
+depuis un autre répertoire de travail et des signaux entre threads.
+Les tests vérifient
+aussi le décodage aux dimensions réelles des quatre rendus, le redimensionnement,
+la conservation du fichier et de la dernière
+image affichée, ainsi que les échecs de rendu/décodage après sauvegarde.
+Ces vérifications sont simulées : aucun essai matériel supplémentaire
+Windows/Arducam n’est attesté par ces tests.
 
 ### Contrôle visuel de l’interface
 

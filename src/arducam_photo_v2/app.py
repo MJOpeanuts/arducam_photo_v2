@@ -25,7 +25,7 @@ from .camera import (GATE, MAX_STABILIZATION_ATTEMPTS, CameraError, CameraReadEr
                      release_device, resolve_device, validate_color)
 from .config import DEFAULT_BACKEND, FOCUS_MAX, FOCUS_MIN, MODES, Bank, CameraDevice
 from .paths import default_photo_dir
-from .processing import archive_capture, load_source, process_color, raw_demosaic, save_processed
+from .processing import CaptureRenderError, archive_capture, load_source, process_color, raw_demosaic, save_processed
 
 ORANGE = "#FF6F4C"
 ORANGE_DARK = "#B84228"
@@ -130,6 +130,25 @@ def to_qimage(image: np.ndarray) -> QImage:
     return QImage(array.data, array.shape[1], array.shape[0], array.strides[0], fmt).copy()
 
 
+def capture_preview(filename: Path) -> QImage:
+    # Decode bytes to avoid filename handling differences; full-resolution pixels are allocated.
+    payload = np.frombuffer(filename.read_bytes(), dtype=np.uint8)
+    try:
+        image = cv2.imdecode(payload, cv2.IMREAD_COLOR)
+    except cv2.error as exc:
+        raise OSError(f"Lecture du rendu impossible : {filename} — {exc}") from exc
+    if image is None:
+        raise OSError(f"Lecture du rendu impossible : {filename}")
+    del payload
+    if max(image.shape[:2]) > 1600:
+        image = process_color(image, "reduce", 1600)
+    preview = to_qimage(image)
+    del image
+    if preview.isNull():
+        raise MemoryError("Impossible d’allouer l’image d’affichage.")
+    return preview
+
+
 class ImageView(QWidget):
     """Working image area: the image fills it; empty states show the squirrel icon."""
 
@@ -171,7 +190,6 @@ class ImageView(QWidget):
                 self.size(), Qt.AspectRatioMode.KeepAspectRatio)
             target = QRectF((self.width() - size.width()) / 2, (self.height() - size.height()) / 2,
                             size.width(), size.height())
-            painter.setClipPath(path)
             painter.drawImage(target, self._image)
             return
         icon_size = max(32, min(72, self.height() // 4))
@@ -406,7 +424,7 @@ class CaptureTask(QRunnable):
     def __init__(self, bank: Bank, photo_dir: Path, device: CameraDevice | None = None):
         super().__init__()
         self.bank = bank
-        self.photo_dir = photo_dir
+        self.photo_dir = photo_dir.resolve()
         self.device = device
         self.signals = TaskSignals()
 
@@ -421,20 +439,43 @@ class CaptureTask(QRunnable):
                 f"Backend choisi : {result.device.backend} ; disponibilité : oui. "
                 f"Caméra résolue : {result.device.label} ; chemin : {result.device.path}. "
                 f"Dimensions réellement reçues : {result.received_shape}, {result.dtype}.")
-            self.signals.progress.emit("Original archivé ; production du rendu…")
-            output = archive_capture(result, self.bank, self.photo_dir)
-            image = cv2.imread(str(output["image"]), cv2.IMREAD_COLOR) if output.get("image") else None
-            if image is not None:
-                ratio = min(1.0, 1600 / max(image.shape[:2]))
-                if ratio < 1:
-                    image = cv2.resize(image, (round(image.shape[1] * ratio), round(image.shape[0] * ratio)),
-                                       interpolation=cv2.INTER_AREA)
-                output["preview"] = image
+            for label in ("largeur", "hauteur"):
+                setting = result.settings.get(label)
+                if isinstance(setting, dict):
+                    self.signals.progress.emit(
+                        f"Dimensions pilote ({label}) : demandée={setting['requested']} ; "
+                        f"relue après configuration complète={setting['readback']} ; "
+                        f"erreur de relecture={setting.get('readback_error')}. "
+                        "La validation porte sur les dimensions réellement reçues.")
+            self.signals.progress.emit("Sauvegarde : archivage de l’original et production du rendu…")
+            try:
+                output = archive_capture(result, self.bank, self.photo_dir)
+            except CaptureRenderError as exc:
+                output = exc.archive
+                output["display_error"] = str(exc)
+                self.signals.progress.emit(f"Sauvegarde : original archivé ; erreur de rendu : {exc}")
+            except Exception as exc:
+                self.signals.progress.emit(f"Sauvegarde : erreur : {exc}")
+                raise
+            else:
+                self.signals.progress.emit(
+                    f"Sauvegarde : original archivé, rendu enregistré : {output['image']} ; "
+                    f"manifeste : {output['manifest']}")
+            del result
+            if output.get("image"):
+                self.signals.progress.emit(f"Chargement : lecture et décodage de {output['image']}")
+                try:
+                    output["preview"] = capture_preview(output["image"])
+                except (OSError, cv2.error, MemoryError, RuntimeError) as exc:
+                    output["display_error"] = str(exc)
+                    self.signals.progress.emit(f"Chargement : erreur : {exc}")
+                else:
+                    preview = output["preview"]
+                    self.signals.progress.emit(
+                        f"Chargement : image autonome prête, {preview.width()} × {preview.height()} ; "
+                        "transmission au thread graphique.")
             self.signals.success.emit(output)
         except Exception as exc:
-            archive = getattr(exc, "archive", None)
-            if archive is not None:
-                self.signals.success.emit(archive)
             self.signals.failure.emit(str(exc))
         finally:
             self.signals.finished.emit()
@@ -1464,6 +1505,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _capture_progress(self, message: str):
+        if message.startswith(("Sauvegarde :", "Chargement :", "Dimensions pilote")):
+            return
         self.capture_state.setText(
             "Image acquise ; archivage et rendu en cours…"
             if message.startswith("Backend choisi :") else message)
@@ -1478,11 +1521,23 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _capture_success(self, output: dict):
         self._last_capture = output
-        self.open_last_button.setEnabled(bool(output.get("image")))
+        self.open_last_button.setEnabled(bool(output.get("image") or output.get("original")))
         release = f"\n⚠ {output['release_error']}" if output.get("release_error") else ""
-        if not output.get("image"):
-            self.capture_state.setText(f"Original conservé : {output['original']}{release}")
-            self.capture_image.setText("Rendu indisponible — original conservé")
+        image = output.get("preview")
+        display_error = output.get("display_error", "Aucune image de résultat valide reçue.")
+        if isinstance(image, QImage) and not image.isNull():
+            try:
+                self.capture_image.set_qimage(image)
+            except (RuntimeError, MemoryError) as exc:
+                display_error = str(exc)
+                image = None
+        if not isinstance(image, QImage) or image.isNull():
+            message = "Photo enregistrée, affichage indisponible"
+            self.capture_state.setText(f"{message}\n{output['directory']}{release}")
+            self.preview_details.append(
+                f"Affichage : {message} : {display_error}")
+            if not self.capture_image.has_image():
+                self.capture_image.setText(message)
             return
         readback = output.get("focus_readback")
         reading = "relecture indisponible" if readback is None else f"relecture {readback:g}"
@@ -1491,9 +1546,9 @@ class MainWindow(QMainWindow):
             f"Focus manuel {output['focus_requested']} — commande acceptée, {reading} ; "
             f"netteté non vérifiée.{release}"
         )
-        image = output.get("preview")
-        if image is not None:
-            self._show_image(self.capture_image, image)
+        self.preview_details.append(
+            f"Affichage : résultat installé dans Capture, {image.width()} × {image.height()}, "
+            "proportions conservées.")
 
     @Slot(str)
     def _capture_failure(self, message: str):
@@ -1502,6 +1557,7 @@ class MainWindow(QMainWindow):
         self.capture_state.setText(f"Échec : {message}")
         QMessageBox.critical(self, "Capture impossible", message)
 
+    @Slot()
     def _capture_finished(self):
         self._busy_capture = False
         self.photo_button.setText("Capturer")
@@ -1534,7 +1590,8 @@ class MainWindow(QMainWindow):
 
     def open_last_image(self):
         if self._last_capture:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_capture["image"])))
+            filename = self._last_capture.get("image") or self._last_capture["original"]
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(filename)))
 
     def open_photo_folder(self):
         self.photo_dir.mkdir(parents=True, exist_ok=True)

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea
 
 from arducam_photo_v2 import app as ui
 from arducam_photo_v2 import camera
@@ -116,9 +116,8 @@ def test_three_tabs_header_logo_footer_and_touch_targets(env, qapp):
     assert window.preview_image.text() and not window.preview_image.has_image()
 
 
-@pytest.mark.parametrize("size", [(1280, 721), (1024, 577), (853, 470)])
+@pytest.mark.parametrize("size", [(1280, 800), (1920, 1080), (1024, 577)])
 def test_focus_and_save_visible_without_scrolling(env, qapp, size):
-    """1280×800 screen at 100/125/150 % Windows scaling, minus title bar and taskbar."""
     window = env.make()
     window.resize(*size)
     window.show()
@@ -131,6 +130,90 @@ def test_focus_and_save_visible_without_scrolling(env, qapp, size):
     assert window.preview_image.width() > window.focus_slider.width()
 
 
+def test_small_viewport_scrolls_controls_without_horizontal_overflow(env, qapp):
+    window = env.make()
+    window.resize(853, 470)
+    window.show()
+    qapp.processEvents()
+    scroll = window.preview_panel.widget(0)
+    assert isinstance(scroll, QScrollArea)
+    assert scroll.horizontalScrollBar().maximum() == 0
+    for widget in (window.focus_slider, window.focus_resend, window.save_bank_button):
+        scroll.ensureWidgetVisible(widget)
+        qapp.processEvents()
+        assert widget.visibleRegion().boundingRect().size() == widget.size()
+
+
+def test_small_capture_keeps_summary_complete_and_actions_reachable(env, qapp):
+    bank = env.store.create(Bank.draft("Planche couleur", "color_4k", 512, ARDUCAM))
+    window = env.make()
+    window.work_bank = window.saved_bank = bank
+    window.session_device = ARDUCAM
+    window._capture_bank_id = bank.id
+    window.tabs.setCurrentIndex(1)
+    window.resize(853, 533)
+    window.show()
+    qapp.processEvents()
+    assert window.capture_summary.height() >= window.capture_summary.heightForWidth(window.capture_summary.width())
+    assert window.photo_button.visibleRegion().boundingRect().size() == window.photo_button.size()
+    scroll = next(area for area in window.capture_page.findChildren(QScrollArea)
+                  if area.widget() is window.photo_button.parentWidget())
+    assert scroll.horizontalScrollBar().maximum() == 0
+    for button in (window.choose_folder_button, window.open_folder_button, window.preview_link):
+        scroll.ensureWidgetVisible(button)
+        qapp.processEvents()
+        assert button.visibleRegion().boundingRect().size() == button.size()
+
+
+@pytest.mark.parametrize("size", [(1280, 800), (1920, 1080)])
+def test_presentation_sizes_and_button_labels_on_each_tab(env, qapp, size):
+    window = env.make()
+    window.resize(*size)
+    window.show()
+    qapp.processEvents()
+    assert window.focus_value.font().pixelSize() == 28
+    assert window.work_title.font().pixelSize() == 20
+    assert window.tabs.tabBar().font().family() == window.photo_button.font().family()
+    assert window.photo_button.text() == "Capturer"
+    assert window.photo_button.iconSize().width() == 26
+    assert not window.photo_button.icon().isNull()
+    for tab in range(3):
+        window.tabs.setCurrentIndex(tab)
+        qapp.processEvents()
+        for button in window.tabs.currentWidget().findChildren(QPushButton):
+            if not button.isVisible():
+                continue
+            assert button.width() >= button.sizeHint().width(), button.text()
+            assert button.visibleRegion().boundingRect().size() == button.size(), button.text()
+            assert button.width() >= 48 and button.height() >= 48
+            assert 15 <= button.font().pixelSize() <= 18
+
+
+def test_combo_popup_rows_are_touch_sized(env, qapp):
+    window = env.make()
+    window.show()
+    qapp.processEvents()
+    window.mode_combo.showPopup()
+    qapp.processEvents()
+    for row in range(window.mode_combo.count()):
+        assert window.mode_combo.view().sizeHintForRow(row) >= 48
+    window.mode_combo.hidePopup()
+
+
+def test_long_capture_error_does_not_push_essential_actions_out_of_view(env, qapp, monkeypatch):
+    window = env.make()
+    window.resize(1280, 800)
+    window.show()
+    window.tabs.setCurrentIndex(1)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
+    window._capture_failure("Étape lecture : image non conforme.\n" * 40)
+    qapp.processEvents()
+    for button in (window.photo_button, window.capture_diagnostic_button, window.choose_folder_button,
+                   window.preview_link):
+        assert button.visibleRegion().boundingRect().size() == button.size()
+    assert "image non conforme" in window.preview_details.toPlainText()
+
+
 def test_touch_keyboard_provides_character_and_numeric_keys(qapp):
     numeric = ui.TouchKeyboard("Focus", numeric=True)
     assert numeric.findChild(type(numeric.entry)).minimumHeight() >= 48
@@ -138,6 +221,12 @@ def test_touch_keyboard_provides_character_and_numeric_keys(qapp):
     name = ui.TouchKeyboard("Bank")
     assert any(button.text() == "Q" for button in name.findChildren(QPushButton))
     assert any(button.text() == "Espace" for button in name.findChildren(QPushButton))
+    for keyboard in (numeric, name):
+        keyboard.show()
+        qapp.processEvents()
+        for button in keyboard.findChildren(QPushButton):
+            assert button.visibleRegion().boundingRect().size() == button.size(), button.text()
+            assert button.width() >= 48 and button.height() >= 48
     numeric.close()
     name.close()
 
@@ -398,7 +487,7 @@ def test_saved_bank_is_selected_in_capture_and_kept_across_tabs(env, qapp, monke
     assert window.capture_selector.currentData() == saved_id
     summary = window.capture_summary.text()
     assert "Nouvelle banque" in summary and "333" in summary and "Arducam" in summary
-    assert "Focus manuel" in summary and "color_720p" in summary
+    assert "Focus manuel" in summary and "Couleur" in summary and "1280 × 720" in summary
     assert window.photo_button.isEnabled() and len(env.workers) == 1
     window.reload_banks()
     window.tabs.setCurrentIndex(2)
@@ -453,6 +542,15 @@ def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
     assert window._task.device == ARDUCAM
     assert (window._task.bank.mode, window._task.bank.focus, window._task.bank.camera) == (
         "color_12mp", 701, ARDUCAM)
+    assert not window.photo_button.isEnabled()
+    assert window.photo_button.text() == "Capture en cours…"
+    window.take_photo()
+    assert captured == [window._task]
+    window._task.signals.progress.emit("Backend choisi : V4L2 ; chemin : très long chemin matériel")
+    assert "archivage" in window.capture_state.text()
+    assert "très long chemin matériel" in window.preview_details.toPlainText()
+    window._capture_finished()
+    assert window.photo_button.text() == "Capturer"
 
 
 # ------------------------------------------------------------------ fault

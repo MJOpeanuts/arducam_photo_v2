@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QIcon, QImage
 from PySide6.QtWidgets import QApplication
 
 from arducam_photo_v2 import resources
@@ -42,6 +43,19 @@ def test_windows_ico_is_multi_resolution_and_square():
         sizes = ico.info["sizes"]
     assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= sizes
     assert all(w == h for w, h in sizes)
+
+
+def test_capture_icon_has_explicit_legible_high_dpi_states():
+    QApplication.instance() or QApplication([])
+    icon = resources.squirrel_icon()
+    for mode, expected in ((QIcon.Mode.Normal, "#ffffff"), (QIcon.Mode.Disabled, "#59636d")):
+        for ratio in (1.0, 1.25, 1.5, 2.0):
+            image = icon.pixmap(QSize(26, 26), ratio, mode).toImage()
+            assert image.width() >= round(26 * ratio)
+            colors = {image.pixelColor(x, y).name()
+                      for x in range(image.width()) for y in range(image.height())
+                      if image.pixelColor(x, y).alpha() > 200}
+            assert expected in colors
 
 
 def test_resources_load_from_another_working_directory(tmp_path):

@@ -17,9 +17,12 @@ le transport UVC 6000 × 9000, `CAP_PROP_CONVERT_RGB=0`, un buffer `uint8` exact
 de 108 000 000 octets, puis sa reconstruction Bayer en 12000 × 9000. La v2
 reprend ces invariants sans importer l’ancien code, ses banques ou préférences.
 
-Captures d’interface (Qt offscreen, image d’aperçu générée, aucune caméra
-réelle) dans `docs/screenshots/` : `preview.png`, `capture.png`,
-`traitement.png` (100 %), `preview-125.png` et `preview-150.png`.
+Captures d’interface après correction (Linux, Qt offscreen, image générée,
+aucune caméra réelle) dans `docs/screenshots/` :
+[Preview](docs/screenshots/preview.png),
+[Capture](docs/screenshots/capture.png),
+[Traitement](docs/screenshots/traitement.png). Les configurations réellement
+contrôlées et la commande de reproduction sont précisées ci-dessous.
 
 ![Preview](docs/screenshots/preview.png)
 
@@ -35,7 +38,9 @@ depuis `assets/icon_ref.png` par `python packaging/make_icon.py`.
 L’icône `squirrel` provient de Lucide (commit `87a89b30`), embarquée telle quelle
 dans `lucide-squirrel.svg` ; sa licence ISC est fournie dans
 `resources/LICENSE-lucide.txt`. Elle sert de pictogramme secondaire (états sans
-image), jamais à la place du logo. La flèche des listes est l’icône Lucide
+image) et accompagne le libellé « Capturer » du bouton de prise de photo,
+jamais à la place du logo. Son rendu est décliné pour les états normal et
+désactivé et les écrans haute résolution. La flèche des listes est l’icône Lucide
 `chevron-down` (même licence), dont seule la couleur du trait est fixée.
 
 ## Installation et lancement depuis les sources
@@ -65,7 +70,7 @@ Sous Windows, DirectShow (`DSHOW`) est utilisé pour l’énumération et l’ou
 après vérification de sa disponibilité dans OpenCV (V4L2 sous Linux).
 Une banque enregistrée avec MSMF ne réimpose pas ce backend : sélectionnez à
 nouveau sa caméra dans Preview puis sauvegardez-la. Aucun index n’est transposé
-d’un backend à l’autre. PHOTO exige le même contexte caméra que Preview.
+d’un backend à l’autre. Capturer exige le même contexte caméra que Preview.
 
 Le mode d’aperçu est un transport couleur
 720p indépendant du Mode d’acquisition sauvegardé dans la banque. L’aperçu se libère en quittant
@@ -74,8 +79,17 @@ chemin d’accès à la caméra.
 
 ## Interface et banques
 
-Les cibles tactiles utilisent des dimensions minimales de 48 pixels logiques et
-les curseurs/boutons ont des zones élargies. La boîte de dialogue intégrée
+La police de l’interface est Segoe UI (substitution par Qt si absente).
+Les textes courants sont à 15 px logiques, les boutons à 16 px, les onglets
+et « Capturer » à 17 px, les titres à 20 px et la valeur du focus à 28 px.
+La taille du texte est indépendante des cibles tactiles : au moins 48 × 48 px
+pour les boutons et les lignes des listes, 56 px de haut pour le curseur.
+La sélection des onglets utilise aussi un soulignement ; les boutons pressés
+et désactivés ont des bordures distinctes. Pendant la capture, le déclencheur
+est désactivé et indique « Capture en cours… », avec une barre de progression.
+Les panneaux de commandes et Diagnostic peuvent défiler au toucher lorsque
+l’espace disponible diminue, sans débordement horizontal.
+La boîte de dialogue intégrée
 permet de saisir un nom ou un Focus manuel sans clavier physique. Qt 6 suit la mise à
 l’échelle Windows ; la géométrie est exprimée en pixels logiques. Les facteurs
 Windows 100 %, 125 % et 150 % restent à vérifier sur un écran tactile réel.
@@ -91,7 +105,8 @@ aucune commande. « Renvoyer » retransmet la même valeur après un refus. Les
 résultats d’une ancienne session ou d’une consigne dépassée sont ignorés. Le
 rapport de commande, son acceptation/refus, la relecture et l’effet optique sont
 distincts ; une commande acceptée ne signifie pas une mise au point réussie.
-Les explications et le journal sont dans « Détails ».
+Les explications et le journal sont dans « Diagnostic », accessible depuis
+Preview et Capture. « Relancer le Preview » précède les paragraphes techniques.
 
 La banque sauvegardée est séparée de la copie de travail ; elle contient son
 identifiant et son nom, la caméra, le Mode d’acquisition, le Focus manuel et les
@@ -131,7 +146,7 @@ l’erreur reste affichée. Le Preview tolère au plus 30 lectures consécutives
 échouées ou non conformes ; une exception de lecture termine immédiatement la
 session. Aucune réouverture automatique n’est tentée, même après changement
 d’onglet, de banque ou actualisation : utilisez « Relancer le Preview ».
-Le diagnostic dans Détails indique le backend choisi, sa disponibilité,
+Le diagnostic indique le backend choisi, sa disponibilité,
 la caméra résolue (index courant et chemin) et les dimensions réellement reçues.
 Les diagnostics de capture et ses erreurs y sont également conservés.
 
@@ -187,6 +202,52 @@ Les tests s’exécutent sous Linux (Python 3.12, `QT_QPA_PLATFORM=offscreen`)
 avec une caméra et un énumérateur factices. Ils couvrent aussi la disponibilité
 des backends, la résolution des index, les échecs terminaux et la relance manuelle.
 Ils ne remplacent pas les essais Windows/Arducam.
+
+### Contrôle visuel de l’interface
+
+Les trois onglets ont été contrôlés sous Linux/Qt offscreen aux six
+configurations suivantes. Les dimensions de fenêtre sont celles de la zone
+cliente, en **pixels logiques** ; les facteurs Qt simulent la densité d’affichage,
+pas le rendu natif de Windows.
+
+| Fenêtre logique | Capture à 100 % | Capture à 125 % | Capture à 150 % |
+| --- | --- | --- | --- |
+| 1280 × 800 | 1280 × 800 px | 1600 × 1000 px | 1920 × 1200 px |
+| 1920 × 1080 | 1920 × 1080 px | 2400 × 1350 px | 2880 × 1620 px |
+
+Les fichiers suivent les noms `preview`, `capture`, `traitement` : sans suffixe
+pour 1280 × 800 à 100 %, suffixe `-125` / `-150` pour cette même fenêtre,
+`-1920`, `-1920-125`, `-1920-150` pour 1920 × 1080.
+Les contrôles couvrent aussi les claviers de nom et de focus, les dialogues
+Diagnostic, modifications non sauvegardées, erreur et ouverture de fichier
+(version Qt non native), le bouton pressé et la capture en cours, les erreurs
+Preview/Capture/Traitement et le défaut de libération caméra.
+Les captures de ces états à 1280 × 800 et 100 % sont également conservées.
+La hauteur des textes repliés, la lisibilité complète des boutons et leur
+accessibilité sont contrôlées par le script, en plus de la revue des images.
+
+Les espaces logiques réduits correspondant à des fenêtres **physiques**
+1280 × 800 et 1920 × 1080 ont également été contrôlés : respectivement
+1024 × 640 / 853 × 533 à 125 % / 150 %, et 1536 × 864 / 1280 × 720.
+Les panneaux défilent si nécessaire : le résumé reste complet, le déclencheur
+de capture reste visible et les autres actions restent accessibles au toucher.
+Les trois vues du cas physique 1280 × 800 à 150 % sont conservées sous
+`*-physical-1280-150.png`. Pour reproduire ce cas, ajouter `--allow-scroll`
+et utiliser `--width 853 --height 533` avec `QT_SCALE_FACTOR=1.5`.
+
+Reproduction depuis la racine, après installation des dépendances de test :
+
+```bash
+QT_QPA_PLATFORM=offscreen:configfile=tests/qt_offscreen.json \
+QT_SCALE_FACTOR=1.25 .venv/bin/python tests/capture_ui.py \
+  --width 1280 --height 800 --states
+```
+
+L’écran virtuel de 3840 × 2160 évite que l’écran offscreen par défaut de
+800 × 800 ne comprime artificiellement les dialogues. Aucun périphérique
+n’est ouvert et les banques de démonstration sont dans un dossier temporaire.
+Les facteurs Windows réels, les dialogues natifs, le tactile matériel et la
+caméra restent à vérifier sur Windows.
 
 Le build portable doit être exécuté sous Windows 11 x64 avec Python 3.12 x64 :
 

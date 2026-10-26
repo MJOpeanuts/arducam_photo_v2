@@ -74,3 +74,15 @@ def window_icon():
         raise ValueError("Icône de fenêtre illisible.")
     icon.addPixmap(source)
     return icon
+
+
+def squirrel_icon():
+    """Explicit state pixmaps keep the local SVG legible, including when disabled."""
+    from PySide6.QtGui import QIcon
+
+    icon = QIcon()
+    for mode in (QIcon.Mode.Normal, QIcon.Mode.Active, QIcon.Mode.Selected, QIcon.Mode.Disabled):
+        color = "#59636D" if mode == QIcon.Mode.Disabled else "#FFFFFF"
+        for ratio in (1.0, 1.25, 1.5, 2.0, 3.0):
+            icon.addPixmap(squirrel(26, color, ratio), mode)
+    return icon

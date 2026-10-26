@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -7,7 +6,11 @@ import pytest
 
 from arducam_photo_v2 import processing
 from arducam_photo_v2.camera import Acquisition
-from arducam_photo_v2.config import Bank, MODES, Mode
+from arducam_photo_v2.config import Bank, CameraDevice, Mode
+
+DEVICE = CameraDevice("MSMF", 0, "Arducam B0494C", "usb#arducam")
+STATS = {"required_valid": 6, "max_attempts": 30, "attempts": 8, "failed_reads": 1,
+         "invalid_frames": 1, "valid_frames": 6, "last_read_error": None, "last_invalid_reason": "transitoire"}
 
 
 def test_color_processing_non_destructive_and_aspect_ratio():
@@ -33,11 +36,11 @@ def test_demosaic_does_not_change_bayer():
 
 
 def _color_capture():
-    bank = Bank.draft("Couleur", "color_720p", 412)
+    bank = Bank.draft("Couleur", "color_720p", 412, DEVICE)
     pixels = np.zeros((720, 1280, 3), np.uint8)
     pixels[..., 1] = 93
     acquisition = Acquisition(pixels, "color_720p", 412, True, 410, (720, 1280, 3),
-                              "uint8", 6, 0, {"read_s": .2}, "MSMF", 0, bank.id, True)
+                              "uint8", STATS, {"read_s": .2}, DEVICE, bank.id, True)
     return acquisition, bank
 
 
@@ -48,6 +51,8 @@ def test_color_archive_manifest_and_no_overwrite(tmp_path):
     assert manifest["configuration_used"]["mode"] == bank.mode
     assert manifest["bank"]["focus"] == bank.focus
     assert manifest["camera"]["received_shape"] == [720, 1280, 3]
+    assert manifest["camera"]["stabilization"] == STATS
+    assert manifest["configuration_used"]["camera"]["path"] == "usb#arducam"
     assert manifest["original"]["format"] == "BGR PNG"
     assert manifest["original"]["sha256"]
     assert manifest["processing"]["durations_seconds"]["archive_total_s"] >= 0
@@ -63,10 +68,10 @@ def test_color_archive_manifest_and_no_overwrite(tmp_path):
 
 def test_processing_failure_keeps_archived_original(tmp_path, monkeypatch):
     monkeypatch.setitem(processing.MODES, "raw_108mp", Mode("raw_108mp", "test", 12, 9, True))
-    bank = Bank.draft("RAW", "raw_108mp", 200)
+    bank = Bank.draft("RAW", "raw_108mp", 200, DEVICE)
     original = np.arange(108, dtype=np.uint8).reshape(9, 12)
-    acquisition = Acquisition(original, "raw_108mp", 200, True, 200, (9, 12, 1), "uint8", 6, 0,
-                              {}, "MSMF", 0, bank.id, True)
+    acquisition = Acquisition(original, "raw_108mp", 200, True, 200, (9, 12, 1), "uint8", STATS,
+                              {}, DEVICE, bank.id, True)
     monkeypatch.setattr(processing, "raw_demosaic", lambda *args, **kwargs: (_ for _ in ()).throw(
         RuntimeError("simulated demosaic failure")))
     with pytest.raises(processing.CaptureRenderError, match="original est conservé"):

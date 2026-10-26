@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from . import resources
 from .banks import BankStore
 from .camera import (GATE, MAX_STABILIZATION_ATTEMPTS, CameraError, CameraReadError,
-                     CameraSelectionError, _cv2, apply_focus, list_devices, open_device,
+                     CameraSelectionError, RAW_BACKEND, _cv2, apply_focus, list_devices, open_device,
                      release_device, resolve_device, validate_color)
 from .config import DEFAULT_BACKEND, FOCUS_MAX, FOCUS_MIN, MODES, Bank, CameraDevice
 from .paths import default_photo_dir
@@ -433,7 +433,10 @@ class CaptureTask(QRunnable):
         try:
             from .camera import acquire
             identifier = str(uuid.uuid4())
-            self.signals.progress.emit("Ouverture caméra, configuration et stabilisation du mode…")
+            capture_backend = RAW_BACKEND if MODES[self.bank.mode].raw else DEFAULT_BACKEND
+            self.signals.progress.emit(
+                f"Mode {self.bank.mode} — backend explicitement choisi : {capture_backend} ; "
+                "ouverture, configuration et stabilisation…")
             result = acquire(self.bank, identifier, device=self.device)
             self.signals.progress.emit(
                 f"Backend choisi : {result.device.backend} ; disponibilité : oui. "
@@ -1532,12 +1535,14 @@ class MainWindow(QMainWindow):
                 display_error = str(exc)
                 image = None
         if not isinstance(image, QImage) or image.isNull():
-            message = "Photo enregistrée, affichage indisponible"
-            self.capture_state.setText(f"{message}\n{output['directory']}{release}")
+            message = display_error or "Aucune image de résultat valide reçue."
+            self.capture_state.setText(
+                f"Original enregistré ; rendu/affichage indisponible : {message}\n"
+                f"{output.get('original') or output.get('directory')}{release}")
             self.preview_details.append(
-                f"Affichage : {message} : {display_error}")
+                f"Affichage : rendu/affichage indisponible : {message}")
             if not self.capture_image.has_image():
-                self.capture_image.setText(message)
+                self.capture_image.setText("Rendu couleur indisponible ; original conservé.")
             return
         readback = output.get("focus_readback")
         reading = "relecture indisponible" if readback is None else f"relecture {readback:g}"
@@ -1569,7 +1574,6 @@ class MainWindow(QMainWindow):
         if self._closing:
             self._finish_close()
             return
-        self._ensure_preview()
 
     def _enter_fault(self):
         message = (f"Défaut caméra : {GATE.fault} La caméra n’est plus considérée comme disponible. "

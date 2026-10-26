@@ -317,6 +317,10 @@ def test_raw_validation_rejects_wrong_type_and_size(small_camera):
         camera.validate_raw(np.zeros(108, dtype=np.uint16))
     with pytest.raises(camera.CameraReadError, match="108"):
         camera.validate_raw(np.zeros(107, dtype=np.uint8))
+    wrong_bgr = np.lib.stride_tricks.as_strided(
+        np.zeros(1, dtype=np.uint8), shape=(9000, 6000, 3), strides=(0, 0, 0))
+    with pytest.raises(camera.CameraReadError, match="162000000 octets"):
+        camera.validate_raw(wrong_bgr)
 
 
 def test_read_exceptions_count_as_failed_reads(small_camera):
@@ -399,3 +403,43 @@ def test_focus_readback_failure_does_not_misreport_accepted_command(small_camera
     assert result.settings["focus"]["accepted"] is True
     assert result.settings["focus"]["readback"] is None
     assert result.settings["focus"]["readback_error"] == "readback unavailable"
+
+
+def test_raw_capture_uses_explicit_msmf_without_changing_color_backend(small_camera, monkeypatch):
+    monkeypatch.setattr(camera, "DEFAULT_BACKEND", "DSHOW")
+    monkeypatch.setattr(camera, "RAW_BACKEND", "MSMF")
+    preview_device = replace(ARDUCAM, backend="DSHOW")
+    raw_device = replace(ARDUCAM, backend="MSMF")
+    cap = FakeCap([np.full(108, 120, np.uint8)] * 6)
+    opened = []
+
+    def opener(device):
+        opened.append(device)
+        return cap
+
+    result = camera.acquire(
+        bank("raw_108mp", device=preview_device), "raw",
+        device=preview_device, opener=opener, enumerator=enumerator_for(raw_device))
+    assert opened == [raw_device] and result.device.backend == "MSMF"
+    assert result.released and cap.released == 1
+    assert (FakeCV.CAP_PROP_FRAME_WIDTH, 6) in cap.set_calls
+    assert (FakeCV.CAP_PROP_FRAME_HEIGHT, 9) in cap.set_calls
+    assert (FakeCV.CAP_PROP_CONVERT_RGB, 0) in cap.set_calls
+    assert camera.resolve_capture_device(
+        preview_device, "MSMF", [raw_device]) == raw_device
+
+
+def test_raw_capture_does_not_fall_back_when_msmf_is_unavailable(small_camera, monkeypatch):
+    monkeypatch.setattr(camera, "DEFAULT_BACKEND", "DSHOW")
+    monkeypatch.setattr(camera, "RAW_BACKEND", "MSMF")
+
+    class NoMSMF(FakeCV):
+        videoio_registry = type("Registry", (), {
+            "hasBackend": staticmethod(lambda api: api == FakeCV.CAP_DSHOW)})
+
+    monkeypatch.setattr(camera, "_cv2", lambda: NoMSMF)
+    with pytest.raises(camera.CameraOpenError, match="MSMF.*disponibilité : non"):
+        camera.acquire(
+            bank("raw_108mp", device=replace(ARDUCAM, backend="DSHOW")), "raw",
+            opener=lambda *_: pytest.fail("must not open another backend"),
+            enumerator=lambda *_: pytest.fail("must not enumerate an unavailable backend"))

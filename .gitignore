@@ -6,3 +6,4 @@ build/
 dist/
 *.spec
 *.egg-info/
+/arducam_108mp.json

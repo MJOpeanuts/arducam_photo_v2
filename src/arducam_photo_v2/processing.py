@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import math
 import os
 import time
 import uuid
@@ -15,12 +16,84 @@ import numpy as np
 from .camera import Acquisition
 from .config import Bank, MODES
 
-_CCM = [
-    (3550, [1.42836, -0.27235, -0.15601, -0.28751, 1.41075, -0.12325, -0.01812, -0.54849, 1.56661]),
-    (4500, [1.36328, -0.19569, -0.16759, -0.25254, 1.52248, -0.26994, -0.01575, -0.53155, 1.54729]),
-]
 _RGB_TO_YUV = np.array([[0.299, 0.587, 0.114], [-0.169, -0.331, 0.500], [0.500, -0.419, -0.081]])
 _YUV_TO_RGB = np.array([[1.0, 0.0, 1.402], [1.0, -0.345, -0.714], [1.0, 1.771, 0.0]])
+REFERENCE_CCT = 4000
+RAW_IMAGE_SHAPE = (9000, 12000)
+REFERENCE_RECIPE = [
+    "soustraction saturante du niveau noir 16",
+    "dématriçage BayerGR2RGB",
+    "CCM constructeur interpolée à 4000 K, saturation 1.0",
+]
+
+
+class CorrectionConfigError(ValueError):
+    pass
+
+
+def project_root() -> Path:
+    """Resolve the source checkout independently of the process working directory."""
+    return Path(__file__).resolve().parents[2]
+
+
+def correction_file() -> Path:
+    return project_root() / "arducam_108mp.json"
+
+
+def _finite_coefficient(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def load_ccm_config(path: str | Path | None = None) -> tuple[list[tuple[int, np.ndarray]], str]:
+    filename = Path(path) if path is not None else correction_file()
+    try:
+        payload = filename.read_bytes()
+    except OSError as exc:
+        raise CorrectionConfigError(
+            f"Fichier de correction couleur constructeur absent ou illisible : {filename} ({exc})."
+        ) from exc
+    try:
+        data = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CorrectionConfigError(f"JSON de correction couleur invalide : {filename} ({exc}).") from exc
+    ccms = data.get("ccms") if isinstance(data, dict) else None
+    if not isinstance(ccms, list) or not ccms:
+        raise CorrectionConfigError(f"Le JSON de correction {filename} doit contenir une liste « ccms » non vide.")
+    result: list[tuple[int, np.ndarray]] = []
+    previous = 0
+    for index, entry in enumerate(ccms):
+        if not isinstance(entry, dict):
+            raise CorrectionConfigError(f"Entrée CCM {index} invalide dans {filename}.")
+        ct, coefficients = entry.get("ct"), entry.get("ccm")
+        if type(ct) is not int or ct <= previous:
+            raise CorrectionConfigError(
+                f"Les températures CCM de {filename} doivent être des entiers strictement croissants."
+            )
+        if (not isinstance(coefficients, list) or len(coefficients) != 9
+                or any(not _finite_coefficient(value) for value in coefficients)):
+            raise CorrectionConfigError(f"La matrice CCM {index} de {filename} doit contenir 9 nombres finis.")
+        result.append((ct, np.asarray(coefficients, dtype=np.float64).reshape(3, 3)))
+        previous = ct
+    return result, hashlib.sha256(payload).hexdigest()
+
+
+def select_ccm(ccms: list[tuple[int, np.ndarray]], temperature: int) -> np.ndarray:
+    if type(temperature) is not int or not ccms:
+        raise ValueError("Température ou liste CCM invalide.")
+    if temperature <= ccms[0][0]:
+        return ccms[0][1].copy()
+    if temperature >= ccms[-1][0]:
+        return ccms[-1][1].copy()
+    for (low_ct, low), (high_ct, high) in zip(ccms, ccms[1:]):
+        if high_ct >= temperature:
+            fraction = (temperature - low_ct) / (high_ct - low_ct)
+            return fraction * high + (1.0 - fraction) * low
+    raise ValueError("Aucune matrice CCM ne couvre la température demandée.")
 
 
 class CaptureRenderError(RuntimeError):
@@ -29,20 +102,20 @@ class CaptureRenderError(RuntimeError):
         self.archive = archive
 
 
-def raw_demosaic(raw: np.ndarray, black_level: int = 16, reference: bool = False) -> np.ndarray:
+def raw_demosaic(raw: np.ndarray, black_level: int = 16, reference: bool = False, *,
+                 ccm_config: tuple[list[tuple[int, np.ndarray]], str] | None = None) -> np.ndarray:
     if not isinstance(raw, np.ndarray) or raw.dtype != np.uint8 or raw.ndim != 2:
         raise ValueError("Le dématriçage attend un Bayer uint8 à deux dimensions.")
     if type(black_level) is not int or not 0 <= black_level <= 255:
         raise ValueError("Niveau noir invalide.")
     image = cv2.cvtColor(cv2.subtract(raw, black_level), cv2.COLOR_BayerGR2RGB)
     if reference:
-        fraction = (4000 - _CCM[0][0]) / (_CCM[1][0] - _CCM[0][0])
-        ccm = ((1 - fraction) * np.array(_CCM[0][1]).reshape(3, 3)
-               + fraction * np.array(_CCM[1][1]).reshape(3, 3))
-        matrix = np.rot90(_YUV_TO_RGB @ np.diag([1., 1., 1.]) @ _RGB_TO_YUV @ ccm, 2).T
+        ccms, _fingerprint = ccm_config or load_ccm_config()
+        ccm = select_ccm(ccms, REFERENCE_CCT)
+        matrix = np.rot90(_YUV_TO_RGB @ _RGB_TO_YUV @ ccm, 2).T
         for top in range(0, image.shape[0], 256):
             chunk = image[top:top + 256]
-            chunk[...] = np.clip(chunk.reshape(-1, 3).astype(np.float32) @ matrix.astype(np.float32),
+            chunk[...] = np.clip(chunk.reshape(-1, 3).astype(np.float64) @ matrix,
                                  0, 255).astype(np.uint8).reshape(chunk.shape)
     return image
 
@@ -99,8 +172,16 @@ def _write_manifest(path: Path, manifest: dict, *, create: bool = False) -> None
 def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path) -> dict:
     """Archive original pixels first; a render error never removes the acquisition."""
     bank.validate()
-    if (acquisition.mode != bank.mode or acquisition.focus_requested != bank.focus
-            or bank.camera is None or acquisition.device.identity != bank.camera.identity):
+    same_camera = bank.camera is not None and acquisition.device.identity == bank.camera.identity
+    if (MODES[acquisition.mode].raw and bank.camera is not None
+            and acquisition.device.backend != bank.camera.backend):
+        same_camera = (
+            bool(acquisition.device.path and bank.camera.path
+                 and acquisition.device.path == bank.camera.path)
+            or bool(acquisition.device.name and bank.camera.name
+                    and acquisition.device.name == bank.camera.name)
+        )
+    if (acquisition.mode != bank.mode or acquisition.focus_requested != bank.focus or not same_camera):
         raise ValueError("Les paramètres acquis ne correspondent pas à la banque figée.")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -146,9 +227,17 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
             "release_error": acquisition.release_error,
         },
         "original": original_record, "render": None,
-        "processing": {"steps": [], "durations_seconds": {
-            **acquisition.timings, "original_write_s": original_write_s,
-        }},
+        "processing": {
+            "steps": [],
+            "reference_recipe": ({
+                "steps": REFERENCE_RECIPE,
+                "ccm_temperature_kelvin": REFERENCE_CCT,
+                "ccm_file": "arducam_108mp.json",
+                "ccm_sha256": None,
+                "demosaic_output_order": "BGR, as expected by OpenCV PNG encoding and the application UI",
+            } if descriptor.raw else None),
+            "durations_seconds": {**acquisition.timings, "original_write_s": original_write_s},
+        },
         "errors": [],
     }
     if acquisition.release_error:
@@ -160,9 +249,10 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
     render_started = time.monotonic()
     try:
         if descriptor.raw:
-            render = raw_demosaic(image, 16, reference=True)
-            manifest["processing"]["steps"] = ["soustraction saturante niveau noir 16",
-                                                    "dématriçage BayerGR2RGB", "CCM de référence 4000 K"]
+            ccm_config = load_ccm_config()
+            manifest["processing"]["reference_recipe"]["ccm_sha256"] = ccm_config[1]
+            render = raw_demosaic(image, 16, reference=True, ccm_config=ccm_config)
+            manifest["processing"]["steps"] = REFERENCE_RECIPE.copy()
             render_name = "reference-color.png"
         else:
             render = image
@@ -206,8 +296,8 @@ def load_source(path: str | Path) -> tuple[np.ndarray, bool, str]:
     if source.suffix.lower() == ".json":
         manifest = json.loads(source.read_text(encoding="utf-8"))
         original = manifest["original"]
-        target = source.parent / original["path"]
-        if target.resolve().parent != source.parent.resolve():
+        target = (source.parent / original["path"]).resolve()
+        if not target.is_relative_to(source.parent.resolve()):
             raise ValueError("Le manifeste référence un fichier hors de son dossier.")
         payload = target.read_bytes()
         if len(payload) != original["size_bytes"]:
@@ -216,14 +306,18 @@ def load_source(path: str | Path) -> tuple[np.ndarray, bool, str]:
             raise ValueError("La somme de contrôle de l’original ne correspond pas au manifeste.")
         if original["format"] == "Bayer":
             width, height = original["width"], original["height"]
-            if len(payload) != width * height or (width, height) != (12000, 9000):
+            if len(payload) != width * height or (height, width) != RAW_IMAGE_SHAPE:
                 raise ValueError("Dimensions du Bayer RAW incorrectes.")
             return np.frombuffer(payload, np.uint8).reshape(height, width).copy(), True, str(source)
-        image = cv2.imread(str(target), cv2.IMREAD_COLOR)
+        image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("L’image d’acquisition ne peut pas être décodée.")
         return image, False, str(source)
-    image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Fichier illisible. Choisissez une image PNG ou JPEG enregistrée : {exc}") from exc
+    image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("Fichier illisible. Choisissez une image PNG ou JPEG enregistrée.")
     return image, False, str(source)

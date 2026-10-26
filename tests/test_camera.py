@@ -100,6 +100,28 @@ def test_all_modes_are_explicit_and_camera_released(small_camera, mode, shape):
         assert (FakeCV.CAP_PROP_CONVERT_RGB, 0) in cap.set_calls
 
 
+@pytest.mark.parametrize("mode", ["color_720p", "color_4k", "color_12mp", "raw_108mp"])
+def test_dimension_readbacks_follow_complete_mode_configuration(small_camera, mode):
+    class DeferredDimensions(FakeCap):
+        def get(self, prop):
+            if prop in (FakeCV.CAP_PROP_FRAME_WIDTH, FakeCV.CAP_PROP_FRAME_HEIGHT):
+                assert FakeCV.CAP_PROP_FRAME_HEIGHT in self.values
+                if mode == "raw_108mp":
+                    assert self.values[FakeCV.CAP_PROP_CONVERT_RGB] == 0
+                return 1280 if prop == FakeCV.CAP_PROP_FRAME_WIDTH else 720
+            return super().get(prop)
+
+    frame = np.full(108, 120, np.uint8) if mode == "raw_108mp" else good()
+    cap = DeferredDimensions([frame] * 6)
+    result = camera.acquire(bank(mode), "capture-id", opener=lambda device: cap,
+                            enumerator=enumerator_for(ARDUCAM))
+    assert result.settings["largeur"]["readback"] == 1280
+    assert result.settings["hauteur"]["readback"] == 720
+    assert result.received_shape == frame.shape
+    assert result.original.shape == ((9, 12) if mode == "raw_108mp" else (8, 12, 3))
+    assert cap.released == 1
+
+
 @pytest.mark.parametrize("mode", ["color_4k", "color_12mp", "raw_108mp"])
 def test_real_720p_read_does_not_validate_higher_resolution_modes(monkeypatch, mode):
     monkeypatch.setattr(camera, "_cv2", lambda: FakeCV)

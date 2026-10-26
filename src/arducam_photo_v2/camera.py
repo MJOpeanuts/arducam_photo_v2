@@ -264,6 +264,12 @@ def _setup(cap, mode: str, focus: int, cv2):
             accepted = bool(cap.set(prop, value))
         except Exception as exc:
             raise CameraSetupError(f"Impossible de configurer {label} : {exc}") from exc
+        if not accepted:
+            raise CameraSetupError(
+                f"Étape configuration : le pilote a refusé {label}={value}. "
+                "Aucun autre mode ne sera essayé.")
+    # Drivers may update width only after height/RAW transport have also been set.
+    for prop, value, label in required:
         try:
             actual = cap.get(prop)
             readback_error = None
@@ -273,13 +279,8 @@ def _setup(cap, mode: str, focus: int, cv2):
         readback = _finite_readback(actual)
         if actual is not None and readback is None and readback_error is None:
             readback_error = "relecture non numérique ou non finie"
-        settings[label] = {"requested": value, "accepted": accepted, "readback": readback,
+        settings[label] = {"requested": value, "accepted": True, "readback": readback,
                            "readback_error": readback_error}
-        if not accepted:
-            raise CameraSetupError(
-                f"Étape configuration : le pilote a refusé {label}={value} ; "
-                f"relecture={readback}, erreur de relecture={readback_error}. "
-                "Aucun autre mode ne sera essayé.")
     settings["focus"] = apply_focus(cap, focus, cv2)
     return settings
 

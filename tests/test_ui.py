@@ -1,11 +1,14 @@
 import json
+import time
 from dataclasses import replace
+from pathlib import Path
 
 import cv2
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea
 
@@ -551,6 +554,213 @@ def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
     assert "très long chemin matériel" in window.preview_details.toPlainText()
     window._capture_finished()
     assert window.photo_button.text() == "Capturer"
+
+
+@pytest.mark.parametrize("mode", ["color_720p", "color_4k", "color_12mp", "raw_108mp"])
+def test_capture_result_reaches_gui_without_reopening_camera(env, qapp, monkeypatch, tmp_path, mode):
+    # Synthetic acquisitions, including full 12 MP; real archive, decoder, signals and painting.
+    descriptor = ui.MODES[mode]
+    width, height = ((120, 90) if descriptor.raw else
+                     (4000, 3000) if mode == "color_12mp" else (2000, 1200))
+    monkeypatch.setitem(ui.MODES, mode, replace(descriptor, width=width, height=height))
+    bank = env.store.create(Bank.draft("Résultat", mode, 300, ARDUCAM))
+    window = env.make()
+    working = tmp_path / "application"
+    working.mkdir()
+    monkeypatch.chdir(working)
+    window.photo_dir = Path("../Photos été 漢字")
+    window._capture_bank_id = bank.id
+    window.session_device = ARDUCAM
+    window.tabs.setCurrentIndex(1)
+    window.show()
+    calls, gui_threads, loading_threads = [], [], []
+    pixels = np.full((height, width) if descriptor.raw else (height, width, 3), 80, np.uint8)
+    block_h, block_w = height // 5, width // 5
+    for rows, columns, color in (
+        (slice(0, block_h), slice(0, block_w), 30 if descriptor.raw else (20, 80, 160)),
+        (slice(-block_h, None), slice(-block_w, None), 150 if descriptor.raw else (160, 80, 20)),
+    ):
+        pixels[rows, columns] = color
+
+    def acquire(frozen, capture_id, *, device=None):
+        calls.append((frozen, device, QThread.currentThread()))
+        return camera.Acquisition(pixels, mode, 300, True, 300, pixels.shape, "uint8",
+                                  {"attempts": 6}, {}, ARDUCAM, capture_id, True)
+
+    def show(image):
+        gui_threads.append(QThread.currentThread())
+        ui.ImageView.set_qimage(window.capture_image, image)
+
+    monkeypatch.setattr(camera, "acquire", acquire)
+    monkeypatch.setattr(window.capture_image, "set_qimage", show)
+    real_preview = ui.capture_preview
+
+    def load(filename):
+        loading_threads.append(QThread.currentThread())
+        return real_preview(filename)
+
+    monkeypatch.setattr(ui, "capture_preview", load)
+    # Reproduce an OpenCV filename-read failure (notably Unicode paths on Windows).
+    monkeypatch.setattr(ui.cv2, "imread", lambda *args: None)
+    previous = ui.to_qimage(np.full((30, 40, 3), 42, np.uint8))
+    window.capture_image.set_qimage(previous)
+    gui_threads.clear()
+    window.take_photo()
+    window.take_photo()
+    assert window.capture_image._image is previous
+    deadline = time.monotonic() + 10
+    while window._busy_capture and time.monotonic() < deadline:
+        QTest.qWait(10)
+    assert not window._busy_capture
+    assert len(calls) == 1 and calls[0][:2] == (bank, ARDUCAM)
+    assert calls[0][2] != window.thread()
+    assert gui_threads == [window.thread()]
+    assert loading_threads == [calls[0][2]]
+    assert window.tabs.currentIndex() == 1 and env.workers == []
+    assert not window._preview_failed
+    assert window.open_last_button.isEnabled() and window.open_folder_button.isEnabled()
+    image = window.capture_image._image
+    assert isinstance(image, QImage) and not image.isNull()
+    assert (image.width(), image.height()) == (
+        (120, 90) if descriptor.raw else (1600, 1200) if mode == "color_12mp" else (1600, 960))
+    filename = window._last_capture["image"]
+    manifest = json.loads(window._last_capture["manifest"].read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert filename.is_absolute()
+    assert filename == window._last_capture["directory"] / manifest["render"]["path"]
+    assert not Path(manifest["render"]["path"]).is_absolute()
+    if not descriptor.raw:
+        assert manifest["render"]["path"] == manifest["original"]["path"] == "reference.png"
+    original_bytes = filename.read_bytes()
+    assert QImage(str(filename)).size().width() == width
+    assert "Capture enregistrée" in window.capture_state.text()
+    diagnostic = window.preview_details.toPlainText()
+    assert diagnostic.index("Sauvegarde : original archivé, rendu enregistré") < diagnostic.index(
+        "Chargement : lecture") < diagnostic.index("Chargement : image autonome") < diagnostic.index(
+            "Affichage : résultat installé")
+    # The delivered QImage outlives the worker and its temporary decoder buffer.
+    window.pool.waitForDone()
+    window._task = None
+    for size in ((1000, 700), (1400, 700)):
+        window.resize(*size)
+        qapp.processEvents()
+        screenshot = window.capture_image.grab().toImage()
+        fitted = image.size().scaled(window.capture_image.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        left = (screenshot.width() - fitted.width()) // 2
+        top = (screenshot.height() - fitted.height()) // 2
+        assert screenshot.pixelColor(screenshot.width() // 2, screenshot.height() // 2) == image.pixelColor(
+            image.width() // 2, image.height() // 2)
+        if left > 12:
+            assert screenshot.pixelColor(left - 2, screenshot.height() // 2).name().upper() == ui.STAGE
+        if top > 12:
+            assert screenshot.pixelColor(screenshot.width() // 2, top - 2).name().upper() == ui.STAGE
+        for fraction in (0.1, 0.9):
+            assert screenshot.pixelColor(left + int(fitted.width() * fraction),
+                                         top + int(fitted.height() * fraction)) == image.pixelColor(
+                                             int(image.width() * fraction), int(image.height() * fraction))
+        assert window.capture_image._image is image
+    assert filename.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("failure", ["decode", "render", "widget", "memory"])
+def test_saved_capture_display_failure_keeps_previous_photo(env, qapp, monkeypatch, tmp_path, failure):
+    from arducam_photo_v2 import processing
+
+    window = env.make()
+    window.tabs.setCurrentIndex(1)
+    previous = ui.to_qimage(np.full((90, 120, 3), 42, np.uint8))
+    window.capture_image.set_qimage(previous)
+    bank = Bank.draft("Enregistrée", "color_720p", 300, ARDUCAM)
+    if failure == "render":
+        monkeypatch.setitem(ui.MODES, "raw_108mp", replace(ui.MODES["raw_108mp"], width=120, height=90))
+        bank = replace(bank, mode="raw_108mp")
+    pixels = np.full((90, 120) if failure == "render" else (720, 1280, 3), 80, np.uint8)
+
+    def acquire(frozen, capture_id, *, device=None):
+        return camera.Acquisition(pixels, bank.mode, 300, True, 300, pixels.shape, "uint8",
+                                  {"attempts": 6}, {}, ARDUCAM, capture_id, True)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("Décodeur indisponible")
+
+    monkeypatch.setattr(camera, "acquire", acquire)
+    if failure in ("decode", "render"):
+        monkeypatch.setattr(ui if failure == "decode" else processing,
+                            "capture_preview" if failure == "decode" else "raw_demosaic", unavailable)
+    elif failure == "widget":
+        def widget_unavailable(image):
+            raise RuntimeError("Widget indisponible")
+        monkeypatch.setattr(window.capture_image, "set_qimage", widget_unavailable)
+    else:
+        def memory_unavailable(filename):
+            raise MemoryError("Mémoire indisponible")
+        monkeypatch.setattr(ui, "capture_preview", memory_unavailable)
+    task = ui.CaptureTask(bank, tmp_path)
+    failures, finished, opened = [], [], []
+    task.signals.success.connect(window._capture_success)
+    task.signals.progress.connect(window.preview_details.append)
+    task.signals.failure.connect(failures.append)
+    task.signals.finished.connect(lambda: finished.append(True))
+    monkeypatch.setattr(ui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+    task.run()
+    assert failures == [] and finished == [True]
+    assert window.capture_state.text().startswith("Photo enregistrée, affichage indisponible")
+    diagnostic = window.preview_details.toPlainText()
+    assert {"decode": "Décodeur", "render": "Décodeur", "widget": "Widget", "memory": "Mémoire"}[failure] in diagnostic
+    assert "Sauvegarde :" in diagnostic and "Affichage :" in diagnostic
+    if failure in ("decode", "memory"):
+        assert "Chargement : erreur :" in diagnostic
+    assert window.capture_image._image is previous
+    assert window.open_last_button.isEnabled() and window.open_folder_button.isEnabled()
+    window.open_last_image()
+    target = window._last_capture.get("image") or window._last_capture["original"]
+    assert opened == [str(target)] and target.is_file()
+    assert window.tabs.currentIndex() == 1 and env.workers == [] and not window._preview_failed
+
+
+@pytest.mark.parametrize("preview", [None, QImage()])
+def test_missing_capture_preview_is_reported_without_clearing_image(env, preview):
+    window = env.make()
+    output = {"directory": window.photo_dir, "image": window.photo_dir / "reference.png", "preview": preview}
+    window._capture_success(output)
+    assert window.capture_state.text().startswith("Photo enregistrée, affichage indisponible")
+    assert window.capture_image.text() == "Photo enregistrée, affichage indisponible"
+    assert window.open_last_button.isEnabled()
+
+
+def test_capture_preview_reports_unreadable_file(tmp_path):
+    filename = tmp_path / "invalid.png"
+    filename.write_bytes(b"not a PNG")
+    with pytest.raises(OSError, match="Lecture du rendu impossible"):
+        ui.capture_preview(filename)
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_to_qimage_owns_pixels_after_numpy_changes_and_deletion(strided):
+    pixels = np.full((30, 40, 3), (20, 80, 160), np.uint8)
+    source = pixels[:, ::2] if strided else pixels
+    image = ui.to_qimage(source)
+    pixels[:] = 0
+    del source, pixels
+    assert image.pixelColor(0, 0).getRgb() == (160, 80, 20, 255)
+
+
+@pytest.mark.parametrize("mode", ["color_720p", "color_4k", "color_12mp", "raw_108mp"])
+def test_capture_preview_decodes_full_size_saved_render(tmp_path, mode):
+    descriptor = ui.MODES[mode]
+    filename = tmp_path / "Rendu été 漢字.png"
+    pixels = np.full((descriptor.height, descriptor.width, 3), (20, 80, 160), np.uint8)
+    ok, encoded = cv2.imencode(".png", pixels)
+    assert ok
+    filename.write_bytes(encoded.tobytes())
+    del pixels
+    image = ui.capture_preview(filename)
+    expected = QSize(descriptor.width, descriptor.height)
+    if max(descriptor.width, descriptor.height) > 1600:
+        expected = expected.scaled(QSize(1600, 1600), Qt.AspectRatioMode.KeepAspectRatio)
+    assert image.size() == expected
+    assert image.pixelColor(image.width() // 2, image.height() // 2).getRgb() == (160, 80, 20, 255)
+    assert filename.read_bytes() == encoded.tobytes()
 
 
 # ------------------------------------------------------------------ fault

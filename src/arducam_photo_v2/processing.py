@@ -5,6 +5,7 @@ import hashlib
 import os
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,7 +127,7 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
         "bank": bank.snapshot(),
         "configuration_used": {
             "mode": acquisition.mode, "requested_focus": acquisition.focus_requested,
-            "camera_index": acquisition.camera_index, "backend": acquisition.backend,
+            "camera": asdict(acquisition.device),
         },
         "camera": {
             "focus_requested": acquisition.focus_requested,
@@ -135,7 +136,7 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
             "focus_readback_note": "Une relecture n’atteste pas de l’effet optique.",
             "settings": acquisition.settings,
             "received_shape": acquisition.received_shape, "dtype": acquisition.dtype,
-            "frames_read": acquisition.frames_read, "failed_reads": acquisition.failed_reads,
+            "stabilization": acquisition.stabilization,
             "released_before_processing": acquisition.released,
             "release_error": acquisition.release_error,
         },

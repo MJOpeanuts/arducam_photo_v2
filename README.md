@@ -17,25 +17,33 @@ le transport UVC 6000 × 9000, `CAP_PROP_CONVERT_RGB=0`, un buffer `uint8` exact
 de 108 000 000 octets, puis sa reconstruction Bayer en 12000 × 9000. La v2
 reprend ces invariants sans importer l’ancien code, ses banques ou préférences.
 
-Capture d’interface à 1600 × 900 pixels avec une mire d’aperçu générée (aucune
-caméra connectée) :
+Captures d’interface (Qt offscreen, image d’aperçu générée, aucune caméra
+réelle) dans `docs/screenshots/` : `preview.png`, `capture.png`,
+`traitement.png` (100 %), `preview-125.png` et `preview-150.png`.
 
-![Interface v2 avec aperçu simulé](docs/screenshots/interface-preview-simule.png)
+![Preview](docs/screenshots/preview.png)
 
-### Ressources et licences
+### Ressources visuelles et licences
 
-Les icônes génériques Lucide de l’ancien projet indiquent une licence ISC, mais
-la v2 ne les embarque pas. Le fichier `nuts-app.svg` et les logos « powered by »
-n’ont pas de licence individuelle vérifiable dans l’ancien dépôt ; ils ne sont
-donc pas copiés. L’interface v2 emploie une identité typographique et une
-palette orange propres. Les mécanismes ISP et les cas synthétiques des tests
-ont été examinés ; aucune capture d’écran de l’ancien projet n’est réutilisée.
+Les logos fournis dans `assets/` (`logo_ref.png` pour l’en-tête,
+`poweredby.png` pour le pied de page, `icon_ref.png` pour l’icône de fenêtre)
+sont copiés à l’identique dans le package `src/arducam_photo_v2/resources/`
+et lus via `importlib.resources` : aucun chemin absolu, aucun dossier externe,
+aucun accès réseau. `app.ico` (16 à 256 px, carré, sans étirement) est généré
+depuis `assets/icon_ref.png` par `python packaging/make_icon.py`.
+
+L’icône `squirrel` provient de Lucide (commit `87a89b30`), embarquée telle quelle
+dans `lucide-squirrel.svg` ; sa licence ISC est fournie dans
+`resources/LICENSE-lucide.txt`. Elle sert de pictogramme secondaire (états sans
+image), jamais à la place du logo. La flèche des listes est l’icône Lucide
+`chevron-down` (même licence), dont seule la couleur du trait est fixée.
 
 ## Installation et lancement depuis les sources
 
 Prérequis : Windows 11 x64, Python 3.12 x64, accès au pilote Arducam/UVC pour
 les fonctions caméra. Dépendances prises en charge : NumPy `>=1.26,<3`,
-OpenCV headless `>=4.10,<5`, PySide6 Essentials `>=6.7,<7`. Dans PowerShell,
+OpenCV headless `>=4.10,<5`, PySide6 Essentials `>=6.7,<7`,
+cv2-enumerate-cameras `>=1.4,<2` (noms et chemins des périphériques). Dans PowerShell,
 depuis la racine du dépôt (aucun chemin de dépôt installé n’est supposé) :
 
 ```powershell
@@ -44,7 +52,17 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m arducam_photo_v2.app
 ```
 
-L’application démarre sur Preview. Le mode d’aperçu est un transport couleur
+L’application démarre sur Preview. Elle ne choisit jamais de caméra
+d’elle-même : la liste « Caméra » présente les périphériques (nom, index
+OpenCV actuel, chemin matériel en info-bulle) ; « Actualiser » relance
+l’énumération. L’aperçu permet de vérifier visuellement le choix. La caméra
+choisie est enregistrée dans la bank (backend, nom, chemin matériel). L’index
+OpenCV n’est pas une identité : au chargement d’une bank, la caméra est
+retrouvée par son chemin matériel, sinon par son nom ; si elle est absente ou
+ambiguë, une sélection est demandée. La session précédente est toujours
+libérée avant l’ouverture d’un autre périphérique ; jamais deux accès simultanés.
+
+Le mode d’aperçu est un transport couleur
 720p indépendant du mode sauvegardé dans la bank. L’aperçu se libère en quittant
 Preview. Capture n’ouvre pas de flux au repos ; Traitement ne possède aucun
 chemin d’accès à la caméra.
@@ -59,13 +77,22 @@ Windows 100 %, 125 % et 150 % restent à vérifier sur un écran tactile réel.
 
 Le focus est une consigne entière de 0 à 1023, sans unité physique ni calibration.
 La valeur reste « Focus non défini » tant que l’utilisateur n’en choisit pas une.
-Le curseur envoie au relâchement et la saisie numérique à la validation. Le
+Le curseur (zone tactile réelle de 56 px de haut) envoie au relâchement, la
+saisie numérique à la validation ; − et + sont actifs dès la première consigne.
+Seule la dernière consigne en attente est transmise. Charger une bank applique
+son focus au Preview actif ; sans Preview actif, la consigne est appliquée à
+l’ouverture de la session suivante. Les synchronisations d’affichage n’envoient
+aucune commande. « Renvoyer » retransmet la même valeur après un refus. Les
+résultats d’une ancienne session ou d’une consigne dépassée sont ignorés. Le
 rapport de commande, son acceptation/refus, la relecture et l’effet optique sont
 distincts ; une commande acceptée ne signifie pas une mise au point réussie.
+Les explications et le journal sont dans « Détails ».
 
 La bank sauvegardée est séparée de la copie de travail ; elle contient le mode
-photo, le focus, le contexte caméra/backend, son identifiant, son schéma et sa
-révision. Capture relit une bank sauvegardée puis en fige une copie. Modifier
+photo, le focus, le contexte caméra, son identifiant et sa révision. Après
+sauvegarde, la bank reste sélectionnée dans Capture, qui affiche son nom, son
+mode, son focus et sa caméra ; les sélections survivent aux rechargements et
+changements d’onglet. Capture relit une bank sauvegardée puis en fige une copie. Modifier
 n’enregistre rien, sauvegarder ne prend aucune photo. Le remplacement demande
 confirmation. Les banks ne sont pas importées de l’ancien projet.
 
@@ -83,9 +110,19 @@ et option RAW sont configurées, puis chaque image reçue est validée en type,
 forme et nombre d’octets. Une configuration acceptée par le pilote ne suffit
 pas. Une image non conforme ou un mode refusé produit une erreur visible.
 
-Au déclenchement : la bank est figée, la caméra est ouverte/configurée, le focus
-est appliqué, six images valides sont lues par défaut (cinq de stabilisation et
-la dernière conservée), puis la caméra est libérée avant le rendu.
+Au déclenchement : la bank est figée, sa caméra est retrouvée, ouverte et
+configurée, le focus est appliqué, puis une stabilisation bornée lit au plus
+30 images. Lectures échouées, buffers non conformes (images transitoires après
+changement de résolution) et images valides sont comptés séparément ; il faut
+six images valides consécutives, la dernière est conservée. Si la limite est
+atteinte, la capture échoue avec un message clair, sans repli de résolution ni
+de backend. Les compteurs sont écrits dans `acquisition.json`
+(`camera.stabilization`). La caméra est libérée avant le rendu.
+
+Si la libération matérielle échoue, les pixels acquis sont archivés, l’erreur
+est affichée et la gestion caméra passe en défaut : Preview et Capture ne
+rouvrent plus la caméra (aucune nouvelle tentative) et l’application demande
+un redémarrage. Traitement reste utilisable.
 
 Les modes couleur archivent `reference.png`. Le RAW est archivé sans retouche
 dans `original.raw` avant dématriçage ; `acquisition.json` partage le même
@@ -108,6 +145,10 @@ Le contraste de ce panneau ne produit aucune commande caméra.
 ## Stockage
 
 - Banks et données d’application : `%LOCALAPPDATA%\ArducamPhotoV2\banks.sqlite3`.
+  Ce stockage de réglages a changé de format : une base antérieure ou illisible
+  est réinitialisée (réglages vides) et un avis est affiché en pied de page.
+  Aucun import des anciens réglages ; photos, RAW et manifestes ne sont jamais
+  touchés.
 - Photos, manifestes et rendus : `%USERPROFILE%\Pictures\ArducamPhotoV2` par
   défaut ; le dossier peut être choisi dans Capture.
 - En l’absence de variables Windows, les données applicatives vont sous
@@ -126,8 +167,8 @@ Tests simulés :
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Les 28 tests actuels passent sous Linux avec une caméra factice et Qt en mode
-offscreen. Ils ne remplacent pas les essais Windows/Arducam.
+Les 66 tests actuels passent sous Linux (Python 3.12, `QT_QPA_PLATFORM=offscreen`)
+avec une caméra et un énumérateur factices. Ils ne remplacent pas les essais Windows/Arducam.
 
 Le build portable doit être exécuté sous Windows 11 x64 avec Python 3.12 x64 :
 
@@ -136,7 +177,8 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build_windows.ps1
 ```
 
 Le script installe les dépendances de build et produit
-`dist\ArducamPhotoV2.exe` (PyInstaller, mode fenêtre, fichier unique). Ce build
+`dist\ArducamPhotoV2.exe` (PyInstaller, mode fenêtre, fichier unique, icône
+`app.ico`, ressources visuelles et `cv2_enumerate_cameras` embarqués). Ce build
 n’a pas été exécuté sur Windows. Un bundle PyInstaller Linux de contrôle a été
 produit ici ; il ne valide ni l’exécutable Windows ni les pilotes caméra.
 
@@ -147,5 +189,8 @@ ni la convention physique de Bayer, ni la netteté/couleur. Sur Windows et la
 B0494C, vérifier séparément les quatre modes (USB 3 requis pour RAW), les formes
 des buffers, la commande/relecture du focus, le rendu avec mire couleur, le
 champ de vue et la netteté en mode photo, les captures successives et la
-libération caméra. Vérifier aussi les facteurs 100/125/150 %, le tactile, et le
-lancement de l’exécutable portable hors ligne.
+libération caméra. Vérifier aussi : noms/chemins listés par MSMF et
+correspondance avec l’index OpenCV, débranchement/rebranchement et deux
+caméras identiques, nombre réel d’images transitoires après changement de
+résolution, comportement en cas d’échec de libération, facteurs 100/125/150 %,
+le tactile, l’icône de l’exécutable et le lancement portable hors ligne.

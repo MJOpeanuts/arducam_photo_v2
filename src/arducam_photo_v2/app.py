@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 
 from . import resources
 from .banks import BankStore
-from .camera import (GATE, CameraError, CameraSelectionError, _cv2, apply_focus, list_devices, open_device,
+from .camera import (GATE, MAX_STABILIZATION_ATTEMPTS, CameraError, CameraReadError,
+                     CameraSelectionError, _cv2, apply_focus, list_devices, open_device,
                      release_device, resolve_device, validate_color)
 from .config import DEFAULT_BACKEND, FOCUS_MAX, FOCUS_MIN, MODES, Bank, CameraDevice
 from .paths import default_photo_dir
@@ -272,6 +273,7 @@ class PreviewWorker(QThread):
         self._stop = threading.Event()
         self._focus_queue: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
         self.release_error: str | None = None
+        self.terminal_error: str | None = None
 
     @property
     def stopping(self) -> bool:
@@ -299,60 +301,76 @@ class PreviewWorker(QThread):
         self.focus_result.emit(self.session_id, sequence, value, apply_focus(cap, value, cv2_module))
 
     def run(self):
+        if self._stop.is_set():
+            return
         try:
             GATE.claim("preview")
         except CameraError as exc:
-            self.status.emit(self.session_id, f"Aperçu impossible : {exc}")
+            self.terminal_error = f"Aperçu impossible : {exc}. Utilisez « Relancer le Preview »."
+            self.status.emit(self.session_id, self.terminal_error)
             return
         cap = None
         try:
             self.status.emit(self.session_id, f"Ouverture de {self.device.label}…")
             cv2_module = _cv2()
+            self.device = resolve_device(self.device, list_devices(DEFAULT_BACKEND))
+            self.status.emit(
+                self.session_id, f"Backend choisi : {self.device.backend} ; disponibilité : oui. "
+                f"Caméra résolue : {self.device.label} ; chemin : {self.device.path or 'indisponible'}.")
+            if self._stop.is_set():
+                return
             cap = open_device(self.device)
             if cap is None or not cap.isOpened():
-                self.status.emit(self.session_id, "Aperçu indisponible : caméra inaccessible.")
-                return
+                raise CameraError("Étape ouverture : caméra inaccessible.")
             for prop, value, label in ((cv2_module.CAP_PROP_FRAME_WIDTH, 1280, "largeur"),
                                        (cv2_module.CAP_PROP_FRAME_HEIGHT, 720, "hauteur")):
                 if not cap.set(prop, value):
-                    self.status.emit(self.session_id, f"Aperçu indisponible : le pilote a refusé la {label} 720p.")
-                    return
+                    raise CameraError(f"Étape configuration : le pilote a refusé la {label} 720p.")
             self.status.emit(self.session_id, "Aperçu de cadrage — en attente d’image.")
-            received = 0
+            failures = 0
+            last_shape = None
             dark_state = None
             while not self._stop.is_set():
                 self._apply_pending(cap, cv2_module)
                 try:
                     ok, frame = cap.read()
                 except Exception as exc:
-                    self.status.emit(self.session_id, f"Erreur de lecture caméra : {exc}")
-                    break
-                if not ok:
-                    self.status.emit(self.session_id, "Aucune image reçue — vérifiez USB et pilote.")
-                    self.msleep(150)
-                    continue
+                    raise CameraReadError(f"Étape lecture caméra : {exc}") from exc
                 try:
+                    if not ok:
+                        raise CameraReadError(
+                            f"Lecture échouée : ok={ok}, forme={getattr(frame, 'shape', None)}, "
+                            f"type={getattr(frame, 'dtype', None)}.")
                     frame = validate_color(frame, "color_720p")
-                except Exception as exc:
+                except CameraReadError as exc:
+                    failures += 1
+                    if failures >= MAX_STABILIZATION_ATTEMPTS:
+                        raise CameraReadError(
+                            f"Étape lecture 720p : {failures} lectures consécutives non conformes. {exc}"
+                        ) from exc
                     self.status.emit(self.session_id, f"Image d’aperçu transitoire ignorée : {exc}")
                     self.msleep(60)
                     continue
+                failures = 0
+                if frame.shape != last_shape:
+                    self.status.emit(self.session_id,
+                                     f"Dimensions réellement reçues : {frame.shape}, {frame.dtype} (BGR).")
+                    last_shape = frame.shape
                 is_dark = float(np.mean(frame[::16, ::16])) < 8
                 if is_dark != dark_state:
                     self.status.emit(self.session_id,
                                      "Image reçue mais sombre — aucun réglage photométrique automatique."
                                      if is_dark else "Aperçu actif — vérifiez qu’il s’agit de la bonne caméra.")
                     dark_state = is_dark
-                received += 1
                 self.frame.emit(self.session_id, to_qimage(frame))
                 self.msleep(15)
         except Exception as exc:
-            self.status.emit(self.session_id, f"Erreur d’aperçu : {exc}")
+            self.terminal_error = f"Erreur d’aperçu : {exc} Utilisez « Relancer le Preview »."
         finally:
             if cap is not None:
                 self.release_error = release_device(cap)
             GATE.release(self.release_error)
-            self.status.emit(self.session_id, self.release_error or "Aperçu libéré.")
+            self.status.emit(self.session_id, self.release_error or self.terminal_error or "Aperçu libéré.")
 
 
 class TaskSignals(QObject):
@@ -363,10 +381,11 @@ class TaskSignals(QObject):
 
 
 class CaptureTask(QRunnable):
-    def __init__(self, bank: Bank, photo_dir: Path):
+    def __init__(self, bank: Bank, photo_dir: Path, device: CameraDevice | None = None):
         super().__init__()
         self.bank = bank
         self.photo_dir = photo_dir
+        self.device = device
         self.signals = TaskSignals()
 
     @Slot()
@@ -375,7 +394,11 @@ class CaptureTask(QRunnable):
             from .camera import acquire
             identifier = str(uuid.uuid4())
             self.signals.progress.emit("Ouverture caméra, configuration et stabilisation du mode…")
-            result = acquire(self.bank, identifier)
+            result = acquire(self.bank, identifier, device=self.device)
+            self.signals.progress.emit(
+                f"Backend choisi : {result.device.backend} ; disponibilité : oui. "
+                f"Caméra résolue : {result.device.label} ; chemin : {result.device.path}. "
+                f"Dimensions réellement reçues : {result.received_shape}, {result.dtype}.")
             self.signals.progress.emit("Original archivé ; production du rendu…")
             output = archive_capture(result, self.bank, self.photo_dir)
             image = cv2.imread(str(output["image"]), cv2.IMREAD_COLOR) if output.get("image") else None
@@ -475,6 +498,7 @@ class MainWindow(QMainWindow):
         self.preview_worker: PreviewWorker | None = None
         self.preview_token: str | None = None
         self._restart_requested = False
+        self._preview_failed = False
         self._pending_focus: tuple[int, int] | None = None
         self._focus_seq = 0
         self._focus_report: dict = {"state": "none"}
@@ -843,10 +867,12 @@ class MainWindow(QMainWindow):
             return
         try:
             self.devices = list_devices(DEFAULT_BACKEND)
+            self.preview_details.append(f"Backend choisi : {DEFAULT_BACKEND} ; disponibilité : oui.")
             error = None
         except Exception as exc:
             self.devices = []
             error = f"Énumération des caméras impossible : {exc}"
+            self.preview_details.append(error)
         expected = self.session_device or self.work_bank.camera
         resolved = None
         message = error
@@ -883,7 +909,7 @@ class MainWindow(QMainWindow):
     def _update_camera_identity(self):
         device = self.session_device
         self.camera_identity.setText(
-            "Caméra du Preview : aucune" if device is None else
+            f"Backend choisi : {DEFAULT_BACKEND}\nCaméra du Preview : aucune" if device is None else
             f"Caméra du Preview : {device.name or 'nom indisponible'}\nBackend {device.backend}, "
             f"index actuel {device.index}\nChemin : {device.path or 'indisponible'}")
 
@@ -907,7 +933,7 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------- preview
     def _preview_wanted(self) -> bool:
         return (self.tabs.currentIndex() == 0 and self.session_device is not None and not GATE.fault
-                and not self._busy_capture and not self._closing)
+                and not self._preview_failed and not self._busy_capture and not self._closing)
 
     def _session_active(self) -> bool:
         worker = self.preview_worker
@@ -961,6 +987,7 @@ class MainWindow(QMainWindow):
             self.preview_token = None
 
     def restart_preview(self):
+        self._preview_failed = False
         self._restart_requested = True
         self.preview_status.setText("Libération puis réouverture de l’aperçu…")
         self._ensure_preview()
@@ -1002,6 +1029,9 @@ class MainWindow(QMainWindow):
             return
         self.preview_worker = None
         self.preview_token = None
+        if worker.terminal_error and not self._restart_requested:
+            self._preview_failed = True
+            self._set_preview_message(worker.terminal_error)
         if GATE.fault:
             self._enter_fault()
         if self.tabs.currentIndex() == 1:
@@ -1166,7 +1196,7 @@ class MainWindow(QMainWindow):
         self.refresh_work_controls()
         if bank.camera is not None:
             try:
-                self.devices = list_devices(bank.camera.backend)
+                self.devices = list_devices(DEFAULT_BACKEND)
                 self.session_device = resolve_device(bank.camera, self.devices)
                 self._set_preview_message(f"Caméra de la banque : {self.session_device.label}.")
             except Exception as exc:
@@ -1326,6 +1356,10 @@ class MainWindow(QMainWindow):
                 else:
                     ready = True
                     self.capture_reason.setText("PHOTO utilise une copie figée de cette banque sauvegardée.")
+                    if self.session_device is None or bank.camera.identity != self.session_device.identity:
+                        ready = False
+                        self.capture_reason.setText(
+                            "Chargez cette banque dans Preview et sélectionnez sa caméra avant PHOTO.")
         except Exception as exc:
             self.capture_summary.setText("La banque sélectionnée est invalide.")
             self.capture_reason.setText(str(exc))
@@ -1348,6 +1382,10 @@ class MainWindow(QMainWindow):
             frozen = self.store.get(self._capture_bank_id)
             if frozen.focus is None or frozen.camera is None:
                 raise ValueError("Cette banque ne définit pas de Focus manuel ou de caméra.")
+            if self.session_device is None or frozen.camera.identity != self.session_device.identity:
+                raise CameraSelectionError(
+                    "La caméra de la banque ne correspond pas au contexte Preview. "
+                    "Chargez cette banque dans Preview et sélectionnez sa caméra avant PHOTO.")
         except Exception as exc:
             self._error("Banque inutilisable", exc)
             return
@@ -1356,8 +1394,9 @@ class MainWindow(QMainWindow):
         self.choose_folder_button.setEnabled(False)
         self.capture_progress.show()
         self.capture_state.setText("Préparation de la capture…")
-        self._task = CaptureTask(frozen, self.photo_dir)
+        self._task = CaptureTask(frozen, self.photo_dir, self.session_device)
         self._task.signals.progress.connect(self.capture_state.setText)
+        self._task.signals.progress.connect(self.preview_details.append)
         self._task.signals.success.connect(self._capture_success)
         self._task.signals.failure.connect(self._capture_failure)
         self._task.signals.finished.connect(self._capture_finished)
@@ -1392,6 +1431,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _capture_failure(self, message: str):
+        self._preview_failed = True
+        self.preview_details.append(f"Échec capture : {message}. Utilisez « Relancer le Preview ».")
         self.capture_state.setText(f"Échec : {message}")
         QMessageBox.critical(self, "Capture impossible", message)
 

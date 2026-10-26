@@ -61,6 +61,11 @@ OpenCV n’est pas une identité : au chargement d’une banque, la caméra est
 retrouvée par son chemin matériel, sinon par son nom ; si elle est absente ou
 ambiguë, une sélection est demandée. La session précédente est toujours
 libérée avant l’ouverture d’un autre périphérique ; jamais deux accès simultanés.
+Sous Windows, DirectShow (`DSHOW`) est utilisé pour l’énumération et l’ouverture,
+après vérification de sa disponibilité dans OpenCV (V4L2 sous Linux).
+Une banque enregistrée avec MSMF ne réimpose pas ce backend : sélectionnez à
+nouveau sa caméra dans Preview puis sauvegardez-la. Aucun index n’est transposé
+d’un backend à l’autre. PHOTO exige le même contexte caméra que Preview.
 
 Le mode d’aperçu est un transport couleur
 720p indépendant du Mode d’acquisition sauvegardé dans la banque. L’aperçu se libère en quittant
@@ -107,7 +112,7 @@ confirmation. Les banques de l’ancien projet ne sont pas importées.
 | `color_12mp` | BGR uint8, 4000 × 3000 |
 | `raw_108mp` | Bayer uint8 reconstruit, 12000 × 9000 ; transport 6000 × 9000 |
 
-L’API OpenCV MSMF est sélectionnée explicitement, sans repli. Largeur/hauteur
+L’API OpenCV DirectShow est sélectionnée explicitement sous Windows, sans repli. Largeur/hauteur
 et option RAW sont configurées, puis chaque image reçue est validée en type,
 forme et nombre d’octets. Une configuration acceptée par le pilote ne suffit
 pas. Une image non conforme ou un mode refusé produit une erreur visible.
@@ -120,6 +125,15 @@ six images valides consécutives, la dernière est conservée. Si la limite est
 atteinte, la capture échoue avec un message clair, sans repli de résolution ni
 de backend. Les compteurs sont écrits dans `acquisition.json`
 (`camera.stabilization`). La caméra est libérée avant le rendu.
+
+Après un échec d’ouverture ou de lecture terminal, la caméra est libérée et
+l’erreur reste affichée. Le Preview tolère au plus 30 lectures consécutives
+échouées ou non conformes ; une exception de lecture termine immédiatement la
+session. Aucune réouverture automatique n’est tentée, même après changement
+d’onglet, de banque ou actualisation : utilisez « Relancer le Preview ».
+Le diagnostic dans Détails indique le backend choisi, sa disponibilité,
+la caméra résolue (index courant et chemin) et les dimensions réellement reçues.
+Les diagnostics de capture et ses erreurs y sont également conservés.
 
 Si la libération matérielle échoue, les pixels acquis sont archivés, l’erreur
 est affichée et la gestion caméra passe en défaut : Preview et Capture ne
@@ -169,8 +183,10 @@ Tests simulés :
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Les 66 tests actuels passent sous Linux (Python 3.12, `QT_QPA_PLATFORM=offscreen`)
-avec une caméra et un énumérateur factices. Ils ne remplacent pas les essais Windows/Arducam.
+Les tests s’exécutent sous Linux (Python 3.12, `QT_QPA_PLATFORM=offscreen`)
+avec une caméra et un énumérateur factices. Ils couvrent aussi la disponibilité
+des backends, la résolution des index, les échecs terminaux et la relance manuelle.
+Ils ne remplacent pas les essais Windows/Arducam.
 
 Le build portable doit être exécuté sous Windows 11 x64 avec Python 3.12 x64 :
 
@@ -186,12 +202,17 @@ produit ici ; il ne valide ni l’exécutable Windows ni les pilotes caméra.
 
 ### Vérifications matérielles restantes
 
+Un essai sur le PC Windows (Python 3.12.10, OpenCV headless 4.14.0.94) a validé
+l’ouverture DirectShow et une lecture couleur de forme `(720, 1280, 3)` alors
+que MSMF y est indisponible. Cela ne valide ni le Focus manuel, ni les captures
+dans les quatre modes, ni les modes 4K, 12 MP ou RAW 108 MP.
+
 Les essais simulés ne valident ni le pilote, ni la prise en charge des formats,
 ni la convention physique de Bayer, ni la netteté/couleur. Sur Windows et la
 B0494C, vérifier séparément les quatre modes (USB 3 requis pour RAW), les formes
 des buffers, la commande/relecture du Focus manuel, le rendu avec mire couleur, le
 champ de vue et la netteté en mode photo, les captures successives et la
-libération caméra. Vérifier aussi : noms/chemins listés par MSMF et
+libération caméra. Vérifier aussi : noms/chemins listés par DirectShow et
 correspondance avec l’index OpenCV, débranchement/rebranchement et deux
 caméras identiques, nombre réel d’images transitoires après changement de
 résolution, comportement en cas d’échec de libération, facteurs 100/125/150 %,

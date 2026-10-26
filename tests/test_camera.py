@@ -4,19 +4,21 @@ import numpy as np
 import pytest
 
 from arducam_photo_v2 import camera
-from arducam_photo_v2.config import Bank, CameraDevice
+from arducam_photo_v2.config import DEFAULT_BACKEND, Bank, CameraDevice
 
-ARDUCAM = CameraDevice("MSMF", 0, "Arducam B0494C", r"\\?\usb#vid_0c45&pid_6366#arducam")
-WEBCAM = CameraDevice("MSMF", 1, "Integrated Webcam", r"\\?\usb#vid_1111&pid_2222#webcam")
+ARDUCAM = CameraDevice(DEFAULT_BACKEND, 0, "Arducam B0494C", r"\\?\usb#vid_0c45&pid_6366#arducam")
+WEBCAM = CameraDevice(DEFAULT_BACKEND, 1, "Integrated Webcam", r"\\?\usb#vid_1111&pid_2222#webcam")
 
 
 class FakeCV:
+    CAP_DSHOW = 700
     CAP_MSMF = 1400
     CAP_V4L2 = 200
     CAP_PROP_FRAME_WIDTH = 10
     CAP_PROP_FRAME_HEIGHT = 11
     CAP_PROP_CONVERT_RGB = 12
     CAP_PROP_FOCUS = 13
+    videoio_registry = type("Registry", (), {"hasBackend": staticmethod(lambda api: True)})
 
 
 class Info:
@@ -98,14 +100,122 @@ def test_all_modes_are_explicit_and_camera_released(small_camera, mode, shape):
         assert (FakeCV.CAP_PROP_CONVERT_RGB, 0) in cap.set_calls
 
 
+@pytest.mark.parametrize("mode", ["color_4k", "color_12mp", "raw_108mp"])
+def test_real_720p_read_does_not_validate_higher_resolution_modes(monkeypatch, mode):
+    monkeypatch.setattr(camera, "_cv2", lambda: FakeCV)
+    frame = np.zeros((720, 1280, 3), np.uint8)
+    cap = FakeCap([frame] * 6)
+    with pytest.raises(camera.CameraStabilizationError) as caught:
+        camera.acquire(bank(mode), "id", opener=lambda device: cap,
+                       enumerator=enumerator_for(ARDUCAM), max_attempts=6)
+    assert caught.value.stats["invalid_frames"] == 6
+    assert "(720, 1280, 3)" in str(caught.value)
+    assert "Aucune autre résolution" in str(caught.value)
+    assert cap.released == 1 and camera.GATE.owner is None
+
+
 # --- camera choice ---------------------------------------------------------
 
 def test_listing_keeps_names_and_hardware_paths(small_camera):
-    devices = camera.list_devices("MSMF", enumerator=lambda cv2, backend: [
+    devices = camera.list_devices(DEFAULT_BACKEND, enumerator=lambda cv2, backend: [
         Info(0, "Arducam B0494C", ARDUCAM.path), Info(1, "", None)])
     assert devices[0] == ARDUCAM
-    assert devices[1] == CameraDevice("MSMF", 1, None, None)
+    assert devices[1] == CameraDevice(DEFAULT_BACKEND, 1, None, None)
     assert "sans nom" in devices[1].label
+
+
+def test_windows_default_is_directshow(monkeypatch):
+    import runpy
+    import sys
+    from arducam_photo_v2 import config
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert runpy.run_path(config.__file__)["DEFAULT_BACKEND"] == "DSHOW"
+
+
+def test_directshow_available_without_msmf_uses_same_api_for_listing_and_opening(monkeypatch):
+    calls = []
+
+    class DirectShowCV(FakeCV):
+        videoio_registry = type("Registry", (), {
+            "hasBackend": staticmethod(lambda api: api == FakeCV.CAP_DSHOW)})
+
+        @staticmethod
+        def VideoCapture(index, api):
+            calls.append(("open", index, api))
+            return "capture"
+
+    device = replace(ARDUCAM, backend="DSHOW", index=4)
+    monkeypatch.setattr(camera, "_cv2", lambda: DirectShowCV)
+
+    def enumerate_cameras(api):
+        calls.append(("enumerate", api))
+        return [Info(device.index, device.name, device.path)]
+
+    import cv2_enumerate_cameras
+    monkeypatch.setattr(cv2_enumerate_cameras, "enumerate_cameras", enumerate_cameras)
+    resolved = camera.resolve_device(replace(device, index=0), camera.list_devices("DSHOW"))
+    assert camera.open_device(resolved) == "capture"
+    assert calls == [("enumerate", FakeCV.CAP_DSHOW), ("open", 4, FakeCV.CAP_DSHOW)]
+    with pytest.raises(camera.CameraOpenError, match="disponibilité : non"):
+        camera.list_devices("MSMF")
+
+
+def test_unavailable_backend_never_enumerates_or_opens(monkeypatch):
+    class Unavailable(FakeCV):
+        videoio_registry = type("Registry", (), {"hasBackend": staticmethod(lambda api: False)})
+
+        @staticmethod
+        def VideoCapture(*args):
+            pytest.fail("must not open unavailable backend")
+
+    monkeypatch.setattr(camera, "_cv2", lambda: Unavailable)
+    with pytest.raises(camera.CameraOpenError, match="DSHOW"):
+        camera.list_devices("DSHOW", enumerator=lambda *args: pytest.fail("must not enumerate"))
+    with pytest.raises(camera.CameraOpenError, match="DSHOW"):
+        camera.open_device(replace(ARDUCAM, backend="DSHOW"))
+
+
+def test_old_bank_cannot_reimpose_msmf_or_reuse_its_index(small_camera, monkeypatch):
+    monkeypatch.setattr(camera, "DEFAULT_BACKEND", "DSHOW")
+    old = replace(ARDUCAM, backend="MSMF", index=1)
+    current = replace(old, backend="DSHOW", index=4)
+    with pytest.raises(camera.CameraSelectionError, match="autre backend"):
+        camera.resolve_device(old, [current])
+    with pytest.raises(camera.CameraSelectionError, match="DSHOW"):
+        camera.acquire(bank(device=old), "id", opener=lambda d: pytest.fail("must not open"))
+
+
+def test_capture_checks_preview_context_and_reresolves_directshow_index(small_camera, monkeypatch):
+    monkeypatch.setattr(camera, "DEFAULT_BACKEND", "DSHOW")
+    selected = replace(ARDUCAM, backend="DSHOW", index=2)
+    moved = replace(selected, index=4)
+    opened = []
+
+    def opener(device):
+        opened.append(device)
+        return FakeCap([good()] * 6)
+
+    result = camera.acquire(bank(device=selected), "id", device=selected, opener=opener,
+                            enumerator=enumerator_for(moved))
+    assert opened == [moved] and result.device == moved
+    with pytest.raises(camera.CameraSelectionError, match="Contexte"):
+        camera.acquire(bank(device=selected), "id", device=WEBCAM, opener=opener)
+    assert opened == [moved]
+
+
+def test_failed_open_releases_before_explicit_retry(small_camera):
+    class Closed(FakeCap):
+        def isOpened(self):
+            return False
+
+    cap = Closed([])
+    with pytest.raises(camera.CameraOpenError, match="inaccessible"):
+        camera.acquire(bank(), "id", opener=lambda d: cap, enumerator=enumerator_for(ARDUCAM))
+    assert cap.released == 1 and camera.GATE.owner is None
+    result = camera.acquire(bank(), "retry", opener=lambda d: FakeCap([good()] * 6),
+                            enumerator=enumerator_for(ARDUCAM))
+    assert result.released
 
 
 def test_resolution_follows_hardware_path_not_index():

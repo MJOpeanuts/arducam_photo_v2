@@ -13,9 +13,9 @@ import numpy as np
 from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QColor, QDesktopServices, QFont, QImage, QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
-    QStackedWidget, QStyle, QStyleOptionSlider, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QScroller, QSizePolicy, QSlider, QSpinBox,
+    QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionSlider, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from . import resources
@@ -28,7 +28,7 @@ from .paths import default_photo_dir
 from .processing import archive_capture, load_source, process_color, raw_demosaic, save_processed
 
 ORANGE = "#FF6F4C"
-ORANGE_DARK = "#D9512F"
+ORANGE_DARK = "#B84228"
 INK = "#20252B"
 STAGE = "#222A31"
 
@@ -37,25 +37,30 @@ QWidget {{ background: #F6F5F3; color: {INK}; font-family: 'Segoe UI'; font-size
 QTabWidget::pane {{ border: 0; }}
 QTabWidget::tab-bar {{ left: 0; }}
 QTabBar {{ border: 0; }}
-QTabBar::tab {{ min-height: 46px; min-width: 120px; padding: 0 18px; margin-right: 4px; border: 0;
-  border-bottom: 4px solid transparent; color: #66717C; font-size: 17px; font-weight: 600; }}
-QTabBar::tab:selected {{ color: {INK}; border-bottom-color: {ORANGE}; background: white; }}
-QPushButton, QComboBox, QLineEdit, QSpinBox {{ min-height: 48px; padding: 0 12px;
+QTabBar::tab {{ min-height: 48px; min-width: 100px; padding: 0 18px; margin-right: 4px; border: 0;
+  border-bottom: 4px solid transparent; color: #59636D; font-size: 17px; }}
+QTabBar::tab:selected {{ color: {INK}; border-bottom-color: {ORANGE}; background: white; font-weight: 600; }}
+QPushButton, QComboBox, QLineEdit, QSpinBox {{ min-height: 48px; min-width: 24px; padding: 0 12px;
   border: 1px solid #D5D9DE; border-radius: 9px; background: white; }}
-QPushButton {{ font-weight: 600; }}
+QPushButton {{ font-size: 16px; }}
 QPushButton:hover, QComboBox:hover {{ border-color: {ORANGE}; }}
-QPushButton:checked {{ border: 2px solid {ORANGE}; }}
-QPushButton:disabled, QComboBox:disabled {{ color: #9AA2AA; background: #ECECEA; }}
-QPushButton#primary {{ color: white; border: 0; background: {ORANGE_DARK}; font-size: 18px; }}
-QPushButton#primary:hover {{ background: #C2452A; }}
-QPushButton#primary:disabled {{ color: #F4F4F4; background: #E3B1A3; }}
-QPushButton#photo {{ min-height: 68px; font-size: 25px; font-weight: 700; color: white; border: 0;
+QPushButton:pressed {{ border: 2px inset #66717C; background: #E5E8EB; padding-top: 2px; }}
+QPushButton:checked {{ border: 2px solid {INK}; background: #FFE1D8; font-weight: 600; }}
+QPushButton:focus, QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{ outline: none; border: 2px solid {INK}; }}
+QPushButton:disabled, QComboBox:disabled {{ color: #66717C; background: #E8E5E1; border: 1px dashed #B8BDC2; }}
+QPushButton#primary {{ color: white; border: 2px solid transparent; background: {ORANGE_DARK}; }}
+QPushButton#primary:hover {{ background: #A63B24; }}
+QPushButton#photo {{ min-height: 60px; font-size: 17px; color: white; border: 2px solid transparent;
   background: {ORANGE_DARK}; }}
-QPushButton#photo:hover {{ background: #C2452A; }}
-QPushButton#photo:disabled {{ color: #F4F4F4; background: #E3B1A3; }}
+QPushButton#photo:hover {{ background: #A63B24; }}
+QPushButton#primary:focus, QPushButton#photo:focus {{ border: 2px solid {INK}; }}
+QPushButton#primary:pressed, QPushButton#photo:pressed {{ background: #87301D; border: 2px inset white; }}
+QPushButton#primary:disabled, QPushButton#photo:disabled {{
+  color: #59636D; background: #E8E5E1; border: 2px dashed #B8BDC2; }}
 QComboBox::drop-down {{ border: 0; width: 34px; subcontrol-origin: padding; subcontrol-position: center right; }}
 QComboBox::down-arrow {{ image: url("{resources.file_path(resources.CHEVRON)}"); width: 22px; height: 22px; }}
 QComboBox QAbstractItemView {{ min-height: 44px; selection-background-color: #FFE1D8; selection-color: {INK}; }}
+QComboBox QAbstractItemView::item {{ min-height: 48px; padding: 0 12px; }}
 QSlider {{ background: transparent; }}
 QSlider::groove:horizontal {{ height: 12px; background: #DCE0E4; border-radius: 6px; }}
 QSlider::sub-page:horizontal {{ background: #FFB4A1; border-radius: 6px; }}
@@ -65,11 +70,13 @@ QProgressBar {{ min-height: 14px; max-height: 14px; border: 0; border-radius: 7p
 QProgressBar::chunk {{ background: {ORANGE}; border-radius: 7px; }}
 QFrame#card {{ background: white; border: 1px solid #E6E3DF; border-radius: 14px; }}
 QFrame#card QLabel {{ background: transparent; }}
-QLabel#heading {{ font-size: 19px; font-weight: 700; }}
-QLabel#muted {{ color: #66717C; font-size: 14px; }}
-QLabel#value {{ font-size: 26px; font-weight: 700; color: {INK}; }}
+QLabel#heading {{ font-size: 20px; font-weight: 600; }}
+QLabel#muted {{ color: #59636D; }}
+QLabel#value {{ font-size: 28px; font-weight: 600; color: {INK}; }}
 QLabel#fault {{ color: white; background: #B3261E; border-radius: 8px; padding: 8px 12px; font-weight: 600; }}
-QTextEdit {{ border: 1px solid #D5D9DE; border-radius: 8px; background: white; font-size: 13px; }}
+QTextEdit {{ border: 1px solid #D5D9DE; border-radius: 8px; background: white; }}
+QScrollBar:vertical {{ width: 24px; }}
+QScrollBar:horizontal {{ height: 24px; }}
 QScrollArea {{ border: 0; }}
 """
 
@@ -84,7 +91,7 @@ def _ratio() -> float:
 
 def _button(text: str, *, primary: bool = False) -> QPushButton:
     button = QPushButton(text)
-    button.setMinimumHeight(TOUCH_MIN)
+    button.setMinimumSize(TOUCH_MIN, TOUCH_MIN)
     if primary:
         button.setObjectName("primary")
     return button
@@ -94,6 +101,20 @@ def _card() -> QFrame:
     frame = QFrame()
     frame.setObjectName("card")
     return frame
+
+
+def _combo() -> QComboBox:
+    combo = QComboBox()
+    combo.setItemDelegate(QStyledItemDelegate(combo))
+    return combo
+
+
+def _scroll_area() -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+    return scroll
 
 
 def _muted(text: str = "", *, wrap: bool = True) -> QLabel:
@@ -254,6 +275,7 @@ class TouchKeyboard(QDialog):
         controls.addWidget(ok)
         controls.addWidget(cancel)
         layout.addLayout(controls)
+        self.setMinimumWidth(max(440, layout.minimumSize().width()))
 
     def value(self) -> str:
         return self.entry.text()
@@ -552,7 +574,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.tabs, 1)
         footer = QHBoxLayout()
         footer.setContentsMargins(4, 0, 0, 0)
-        self.notice = _muted("", wrap=False)
+        self.notice = _muted()
         self.notice.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         footer.addWidget(self.notice, 1)
         self.powered_by = QLabel()
@@ -565,14 +587,17 @@ class MainWindow(QMainWindow):
 
     def _build_preview(self):
         page = QWidget()
-        layout = QHBoxLayout(page)
-        layout.setContentsMargins(0, 8, 0, 0)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 8, 0, 0)
+        page_layout.setSpacing(8)
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         stage = QVBoxLayout()
         stage.setSpacing(6)
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
-        self.camera_combo = QComboBox()
+        self.camera_combo = _combo()
         self.camera_combo.setAccessibleName("Caméra")
         self.camera_combo.setToolTip("Caméra utilisée par le Preview et enregistrée dans la banque")
         self.camera_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -582,7 +607,7 @@ class MainWindow(QMainWindow):
         self.refresh_cameras_button = _button("Actualiser")
         self.refresh_cameras_button.setToolTip("Actualiser la liste des caméras")
         self.refresh_cameras_button.clicked.connect(self.refresh_devices)
-        self.work_selector = QComboBox()
+        self.work_selector = _combo()
         self.work_selector.setAccessibleName("Banque")
         self.work_selector.setToolTip("Charger une banque sauvegardée (applique son Focus manuel)")
         self.work_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -594,24 +619,25 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.refresh_cameras_button)
         toolbar.addWidget(QLabel("Banque"))
         toolbar.addWidget(self.work_selector, 3)
-        stage.addLayout(toolbar)
+        page_layout.addLayout(toolbar)
         self.preview_image = ImageView("Recherche des caméras…")
         stage.addWidget(self.preview_image, 1)
-        self.preview_status = _muted("Aperçu de cadrage inactif.", wrap=False)
-        self.preview_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.preview_status = _muted("Aperçu de cadrage inactif.")
         stage.addWidget(self.preview_status)
         self.preview_disclaimer = _muted(
             "Aperçu de cadrage 720p : le mode et le champ de vue de la photo peuvent différer.",
-            wrap=False)
-        self.preview_disclaimer.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            wrap=True)
         stage.addWidget(self.preview_disclaimer)
         layout.addLayout(stage, 1)
 
         self.preview_panel = QStackedWidget()
-        self.preview_panel.setFixedWidth(340)
-        self.preview_panel.addWidget(self._build_preview_controls())
+        self.preview_panel.setFixedWidth(360)
+        controls_scroll = _scroll_area()
+        controls_scroll.setWidget(self._build_preview_controls())
+        self.preview_panel.addWidget(controls_scroll)
         self.preview_panel.addWidget(self._build_preview_details())
         layout.addWidget(self.preview_panel)
+        page_layout.addLayout(layout, 1)
         return page
 
     def _build_preview_controls(self):
@@ -619,31 +645,34 @@ class MainWindow(QMainWindow):
         form = QVBoxLayout(card)
         form.setContentsMargins(14, 10, 14, 12)
         form.setSpacing(7)
+        form.setAlignment(Qt.AlignmentFlag.AlignTop)
         head = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(0)
         self.work_title = QLabel()
         self.work_title.setObjectName("heading")
-        self.work_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.dirty_label = _muted("", wrap=False)
+        self.work_title.setWordWrap(True)
+        self.dirty_label = _muted()
         titles.addWidget(self.work_title)
         titles.addWidget(self.dirty_label)
         head.addLayout(titles, 1)
-        self.preview_details_toggle = _button("Détails")
+        self.preview_details_toggle = _button("Diagnostic")
         self.preview_details_toggle.setToolTip("Explications, identité caméra et diagnostic")
         self.preview_details_toggle.clicked.connect(lambda: self.preview_panel.setCurrentIndex(1))
         head.addWidget(self.preview_details_toggle)
         form.addLayout(head)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode d’acquisition"))
-        self.mode_combo = QComboBox()
+        form.addWidget(QLabel("Mode d’acquisition"))
+        self.mode_combo = _combo()
         self.mode_combo.setAccessibleName("Mode d’acquisition")
         self.mode_combo.setToolTip("Mode d’acquisition de la future capture")
         for key, descriptor in MODES.items():
-            self.mode_combo.addItem(descriptor.label, key)
+            label = (f"RAW · {descriptor.width} × {descriptor.height}" if descriptor.raw
+                     else f"Couleur · {descriptor.width} × {descriptor.height}")
+            self.mode_combo.addItem(label, key)
+            self.mode_combo.setItemData(self.mode_combo.count() - 1, descriptor.label, Qt.ItemDataRole.ToolTipRole)
         self.mode_combo.activated.connect(self._mode_changed)
-        mode_row.addWidget(self.mode_combo, 1)
-        form.addLayout(mode_row)
+        form.addWidget(self.mode_combo)
+        form.addWidget(QLabel("Focus manuel"))
         focus_row = QHBoxLayout()
         focus_row.setSpacing(6)
         self.focus_minus = _button("−")
@@ -652,7 +681,6 @@ class MainWindow(QMainWindow):
             button.setFixedWidth(56)
             button.setAutoRepeat(False)
             button.setToolTip(label)
-            button.setStyleSheet("font-size: 24px;")
         self.focus_value = QLabel("—")
         self.focus_value.setObjectName("value")
         self.focus_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -663,9 +691,6 @@ class MainWindow(QMainWindow):
         self.focus_minus.clicked.connect(lambda: self.adjust_focus(-1))
         self.focus_plus.clicked.connect(lambda: self.adjust_focus(1))
         self.focus_input.clicked.connect(self.enter_focus)
-        focus_caption = QLabel("Focus manuel")
-        focus_caption.setStyleSheet("font-weight:600")
-        focus_row.addWidget(focus_caption)
         focus_row.addWidget(self.focus_minus)
         focus_row.addWidget(self.focus_value, 1)
         focus_row.addWidget(self.focus_plus)
@@ -698,11 +723,10 @@ class MainWindow(QMainWindow):
         self.work_name_button = _button("Nommer")
         self.work_name_button.setToolTip("Renommer la banque de travail")
         self.work_name_button.clicked.connect(self.rename_work_bank)
-        actions.addWidget(self.save_bank_button, 2)
+        form.addWidget(self.save_bank_button)
         actions.addWidget(self.new_bank_button, 1)
         actions.addWidget(self.work_name_button, 1)
         form.addLayout(actions)
-        form.addStretch(1)
         return card
 
     def _build_preview_details(self):
@@ -713,9 +737,10 @@ class MainWindow(QMainWindow):
         back.clicked.connect(lambda: self.preview_panel.setCurrentIndex(0))
         self.preview_details_back = back
         outer.addWidget(back)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.restart_preview_button = _button("Relancer le Preview")
+        self.restart_preview_button.clicked.connect(self.restart_preview)
+        outer.addWidget(self.restart_preview_button)
+        scroll = _scroll_area()
         body = QWidget()
         column = QVBoxLayout(body)
         column.setContentsMargins(0, 0, 4, 0)
@@ -733,9 +758,6 @@ class MainWindow(QMainWindow):
         self.camera_identity = _muted()
         self.camera_identity.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(self.camera_identity)
-        self.restart_preview_button = _button("Relancer le Preview")
-        self.restart_preview_button.clicked.connect(self.restart_preview)
-        column.addWidget(self.restart_preview_button)
         self.preview_details = QTextEdit()
         self.preview_details.setReadOnly(True)
         self.preview_details.setMinimumHeight(120)
@@ -752,24 +774,33 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(10)
         card = _card()
-        card.setFixedWidth(340)
         left = QVBoxLayout(card)
+        left.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         left.setContentsMargins(14, 10, 14, 12)
         left.setSpacing(8)
-        self.capture_selector = QComboBox()
-        capture_heading = QLabel("Banque utilisée pour la capture")
+        self.capture_selector = _combo()
+        capture_heading = QLabel("Capture")
         capture_heading.setObjectName("heading")
-        left.addWidget(capture_heading)
+        header = QHBoxLayout()
+        header.addWidget(capture_heading, 1)
+        self.capture_diagnostic_button = _button("Diagnostic")
+        self.capture_diagnostic_button.clicked.connect(self.show_diagnostic)
+        header.addWidget(self.capture_diagnostic_button)
+        left.addLayout(header)
         self.capture_selector.setAccessibleName("Banque utilisée pour la capture")
-        self.capture_selector.setToolTip("Sélectionner une banque sauvegardée pour PHOTO")
+        self.capture_selector.setToolTip("Sélectionner une banque sauvegardée pour Capturer")
+        self.capture_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.capture_selector.setMinimumContentsLength(10)
         self.capture_selector.activated.connect(self._capture_bank_changed)
         left.addWidget(self.capture_selector)
         self.capture_summary = QLabel("Sélectionnez une banque complète.")
         self.capture_summary.setWordWrap(True)
         self.capture_summary.setTextFormat(Qt.TextFormat.RichText)
         left.addWidget(self.capture_summary)
-        self.photo_button = _button("PHOTO", primary=True)
+        self.photo_button = _button("Capturer", primary=True)
         self.photo_button.setObjectName("photo")
+        self.photo_button.setIcon(resources.squirrel_icon())
+        self.photo_button.setIconSize(QSize(26, 26))
         self.photo_button.clicked.connect(self.take_photo)
         left.addWidget(self.photo_button)
         self.capture_progress = QProgressBar()
@@ -778,10 +809,19 @@ class MainWindow(QMainWindow):
         self.capture_progress.hide()
         left.addWidget(self.capture_progress)
         self.capture_reason = _muted()
-        left.addWidget(self.capture_reason)
         self.capture_state = _muted("Aucune opération en cours.")
         self.capture_state.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        left.addWidget(self.capture_state)
+        state_scroll = _scroll_area()
+        state_scroll.setMinimumHeight(72)
+        state_scroll.setMaximumHeight(120)
+        state_body = QWidget()
+        state_layout = QVBoxLayout(state_body)
+        state_layout.setContentsMargins(0, 0, 4, 0)
+        state_layout.addWidget(self.capture_reason)
+        state_layout.addWidget(self.capture_state)
+        state_layout.addStretch(1)
+        state_scroll.setWidget(state_body)
+        left.addWidget(state_scroll)
         left.addStretch(1)
         self.photo_path_label = _muted(str(self.photo_dir))
         left.addWidget(self.photo_path_label)
@@ -802,7 +842,10 @@ class MainWindow(QMainWindow):
         self.preview_link = _button("Préparer une banque dans Preview")
         self.preview_link.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
         left.addWidget(self.preview_link)
-        layout.addWidget(card)
+        controls_scroll = _scroll_area()
+        controls_scroll.setFixedWidth(360)
+        controls_scroll.setWidget(card)
+        layout.addWidget(controls_scroll)
         self.capture_image = ImageView("Aucune image capturée")
         layout.addWidget(self.capture_image, 1)
         return page
@@ -813,10 +856,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(6)
         controls = QHBoxLayout()
-        self.open_source_button = _button("Ouvrir acquisition / image…")
+        self.open_source_button = _button("Ouvrir une source…")
+        self.open_source_button.setToolTip("Ouvrir un manifeste d’acquisition JSON ou une image PNG/JPEG")
         self.open_source_button.clicked.connect(self.open_source)
         controls.addWidget(self.open_source_button)
-        self.operation_combo = QComboBox()
+        self.operation_combo = _combo()
         self.operation_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.operation_combo.setMinimumContentsLength(10)
         self.operation_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -826,6 +870,7 @@ class MainWindow(QMainWindow):
         self.operation_value.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.operation_value.setRange(-100, 100)
         self.operation_value.setPrefix("Contraste ")
+        self.operation_value.hide()
         controls.addWidget(self.operation_value)
         self.apply_button = _button("Appliquer")
         self.apply_button.clicked.connect(self.apply_processing)
@@ -835,11 +880,9 @@ class MainWindow(QMainWindow):
         self.save_result_button.setEnabled(False)
         controls.addWidget(self.save_result_button)
         layout.addLayout(controls)
-        self.source_info = _muted("Ouvrez un manifeste d’acquisition JSON, une image PNG ou JPEG.", wrap=False)
-        self.source_info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.source_info = _muted("Ouvrez un manifeste d’acquisition JSON, une image PNG ou JPEG.")
         layout.addWidget(self.source_info)
-        self.processing_status = _muted("Aucun traitement en cours. Aucun accès caméra depuis cet onglet.", wrap=False)
-        self.processing_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.processing_status = _muted("Aucun traitement en cours. Aucun accès caméra depuis cet onglet.")
         layout.addWidget(self.processing_status)
         images = QHBoxLayout()
         source_box = QVBoxLayout()
@@ -855,6 +898,20 @@ class MainWindow(QMainWindow):
         images.addLayout(result_box, 1)
         layout.addLayout(images, 1)
         return page
+
+    def show_diagnostic(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Diagnostic")
+        dialog.resize(640, 440)
+        layout = QVBoxLayout(dialog)
+        log = QTextEdit()
+        log.setReadOnly(True)
+        log.setPlainText(self.preview_details.toPlainText() or "Aucun rapport caméra.")
+        layout.addWidget(log, 1)
+        close = _button("Fermer")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.exec()
 
     def _show_image(self, view: ImageView, image: np.ndarray):
         view.set_array(image)
@@ -1005,6 +1062,8 @@ class MainWindow(QMainWindow):
     def _preview_status(self, token: str, message: str):
         self.preview_details.append(message)
         if token == self.preview_token:
+            if message.startswith(("Backend choisi :", "Dimensions réellement reçues :")):
+                return
             self.preview_status.setText(message)
             self.preview_status.setToolTip(message)
             if not self.preview_image.has_image():
@@ -1142,13 +1201,6 @@ class MainWindow(QMainWindow):
     def _empty_draft() -> Bank:
         return Bank.draft("Nouvelle banque", "color_720p", None)
 
-    @staticmethod
-    def _bank_item(bank: Bank) -> str:
-        descriptor = MODES[bank.mode]
-        focus = "—" if bank.focus is None else bank.focus
-        return (f"{bank.name}  ·  Mode d’acquisition : {descriptor.width}×{descriptor.height}"
-                f"  ·  Focus manuel : {focus}")
-
     def reload_banks(self):
         """Rebuild both lists while preserving each current selection."""
         banks = self.store.list()
@@ -1162,7 +1214,10 @@ class MainWindow(QMainWindow):
             combo.clear()
             combo.addItem(placeholder, None)
             for bank in banks:
-                combo.addItem(self._bank_item(bank), bank.id)
+                combo.addItem(bank.name, bank.id)
+                focus = "non défini" if bank.focus is None else str(bank.focus)
+                combo.setItemData(combo.count() - 1, f"{MODES[bank.mode].label}\nFocus manuel : {focus}",
+                                  Qt.ItemDataRole.ToolTipRole)
             combo.setCurrentIndex(max(0, combo.findData(selected)) if selected else 0)
             combo.blockSignals(False)
 
@@ -1251,9 +1306,9 @@ class MainWindow(QMainWindow):
     def _update_dirty(self):
         dirty = self._dirty()
         if self.saved_bank is None:
-            label = "Nouvelle banque non sauvegardée" if dirty else "Brouillon vide"
+            label = "Brouillon à sauvegarder" if dirty else "Brouillon vide"
         else:
-            label = "Modifications non sauvegardées" if dirty else f"Banque sauvegardée · révision {self.saved_bank.revision}"
+            label = "Modifications à sauvegarder" if dirty else f"Sauvegardée · révision {self.saved_bank.revision}"
         self.work_title.setText(self.work_bank.name)
         self.work_title.setToolTip(self.work_bank.name)
         self.dirty_label.setText(label)
@@ -1343,10 +1398,11 @@ class MainWindow(QMainWindow):
                 focus = "non défini" if bank.focus is None else f"{bank.focus} / 1023"
                 camera = bank.camera.name or bank.camera.path if bank.camera else "non définie"
                 self.capture_summary.setText(
-                    f"<div style='font-size:20px;font-weight:700'>{_escape(bank.name)}</div>"
-                    f"<div><b>Mode d’acquisition</b> : {_escape(descriptor.label)}</div>"
-                    f"<div><b>Focus manuel</b> {focus} <span style='color:#66717C'>(consigne)</span></div>"
-                    f"<div><b>Caméra</b> {_escape(camera)}</div>"
+                    f"<div style='font-size:20px;font-weight:600'>{_escape(bank.name)}</div>"
+                    f"<div>Mode : {'RAW' if descriptor.raw else 'Couleur'} · "
+                    f"{descriptor.width} × {descriptor.height}</div>"
+                    f"<div>Focus manuel : {focus} (consigne)</div>"
+                    f"<div>Caméra : {_escape(camera)}</div>"
                     f"<div style='color:#66717C'>Révision {bank.revision}</div>")
                 missing = [label for label, value in (("Focus manuel", bank.focus), ("caméra", bank.camera))
                            if value is None]
@@ -1355,11 +1411,11 @@ class MainWindow(QMainWindow):
                         f"Banque incomplète ({', '.join(missing)}) : complétez-la dans Preview puis sauvegardez.")
                 else:
                     ready = True
-                    self.capture_reason.setText("PHOTO utilise une copie figée de cette banque sauvegardée.")
+                    self.capture_reason.setText("Prêt à capturer avec cette banque sauvegardée.")
                     if self.session_device is None or bank.camera.identity != self.session_device.identity:
                         ready = False
                         self.capture_reason.setText(
-                            "Chargez cette banque dans Preview et sélectionnez sa caméra avant PHOTO.")
+                            "Chargez cette banque dans Preview et sélectionnez sa caméra avant de capturer.")
         except Exception as exc:
             self.capture_summary.setText("La banque sélectionnée est invalide.")
             self.capture_reason.setText(str(exc))
@@ -1367,8 +1423,10 @@ class MainWindow(QMainWindow):
             self.capture_reason.setText("Caméra en défaut : redémarrez l’application.")
             ready = False
         elif ready and self.preview_worker is not None:
-            self.capture_reason.setText("Libération du Preview en cours ; PHOTO sera disponible ensuite.")
+            self.capture_reason.setText("Libération du Preview en cours ; capture disponible ensuite.")
             ready = False
+        if self._busy_capture and not GATE.fault:
+            self.capture_reason.setText("Capture en cours — attendez la fin de l’opération.")
         self.photo_button.setEnabled(ready and not self._busy_capture)
 
     def take_photo(self):
@@ -1385,22 +1443,30 @@ class MainWindow(QMainWindow):
             if self.session_device is None or frozen.camera.identity != self.session_device.identity:
                 raise CameraSelectionError(
                     "La caméra de la banque ne correspond pas au contexte Preview. "
-                    "Chargez cette banque dans Preview et sélectionnez sa caméra avant PHOTO.")
+                    "Chargez cette banque dans Preview et sélectionnez sa caméra avant de capturer.")
         except Exception as exc:
             self._error("Banque inutilisable", exc)
             return
         self._busy_capture = True
         self.photo_button.setEnabled(False)
+        self.photo_button.setText("Capture en cours…")
+        self.capture_reason.setText("Capture en cours — attendez la fin de l’opération.")
         self.choose_folder_button.setEnabled(False)
         self.capture_progress.show()
         self.capture_state.setText("Préparation de la capture…")
         self._task = CaptureTask(frozen, self.photo_dir, self.session_device)
-        self._task.signals.progress.connect(self.capture_state.setText)
+        self._task.signals.progress.connect(self._capture_progress)
         self._task.signals.progress.connect(self.preview_details.append)
         self._task.signals.success.connect(self._capture_success)
         self._task.signals.failure.connect(self._capture_failure)
         self._task.signals.finished.connect(self._capture_finished)
         self._start_task(self._task)
+
+    @Slot(str)
+    def _capture_progress(self, message: str):
+        self.capture_state.setText(
+            "Image acquise ; archivage et rendu en cours…"
+            if message.startswith("Backend choisi :") else message)
 
     def _start_task(self, task: QRunnable):
         self._active_tasks.append(task)
@@ -1438,6 +1504,7 @@ class MainWindow(QMainWindow):
 
     def _capture_finished(self):
         self._busy_capture = False
+        self.photo_button.setText("Capturer")
         self.capture_progress.hide()
         self.choose_folder_button.setEnabled(True)
         if GATE.fault:
@@ -1569,6 +1636,7 @@ class MainWindow(QMainWindow):
         operation = self.operation_combo.currentData()
         enabled = operation in ("contrast", "reduce")
         self.operation_value.setEnabled(enabled)
+        self.operation_value.setVisible(enabled)
         if operation != getattr(self, "_last_operation", None):
             if operation == "contrast":
                 self.operation_value.setRange(-100, 100)

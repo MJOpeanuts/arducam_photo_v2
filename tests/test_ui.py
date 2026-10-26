@@ -552,8 +552,11 @@ def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
     window._task.signals.progress.emit("Backend choisi : V4L2 ; chemin : très long chemin matériel")
     assert "archivage" in window.capture_state.text()
     assert "très long chemin matériel" in window.preview_details.toPlainText()
+    preview_restarts = []
+    monkeypatch.setattr(window, "_ensure_preview", lambda: preview_restarts.append(True))
     window._capture_finished()
     assert window.photo_button.text() == "Capturer"
+    assert preview_restarts == []
 
 
 @pytest.mark.parametrize("mode", ["color_720p", "color_4k", "color_12mp", "raw_108mp"])
@@ -635,6 +638,8 @@ def test_capture_result_reaches_gui_without_reopening_camera(env, qapp, monkeypa
     assert QImage(str(filename)).size().width() == width
     assert "Capture enregistrée" in window.capture_state.text()
     diagnostic = window.preview_details.toPlainText()
+    capture_backend = ui.RAW_BACKEND if descriptor.raw else ui.DEFAULT_BACKEND
+    assert f"Mode {mode} — backend explicitement choisi : {capture_backend}" in diagnostic
     assert diagnostic.index("Sauvegarde : original archivé, rendu enregistré") < diagnostic.index(
         "Chargement : lecture") < diagnostic.index("Chargement : image autonome") < diagnostic.index(
             "Affichage : résultat installé")
@@ -704,7 +709,7 @@ def test_saved_capture_display_failure_keeps_previous_photo(env, qapp, monkeypat
     monkeypatch.setattr(ui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
     task.run()
     assert failures == [] and finished == [True]
-    assert window.capture_state.text().startswith("Photo enregistrée, affichage indisponible")
+    assert window.capture_state.text().startswith("Original enregistré ; rendu/affichage indisponible")
     diagnostic = window.preview_details.toPlainText()
     assert {"decode": "Décodeur", "render": "Décodeur", "widget": "Widget", "memory": "Mémoire"}[failure] in diagnostic
     assert "Sauvegarde :" in diagnostic and "Affichage :" in diagnostic
@@ -721,10 +726,11 @@ def test_saved_capture_display_failure_keeps_previous_photo(env, qapp, monkeypat
 @pytest.mark.parametrize("preview", [None, QImage()])
 def test_missing_capture_preview_is_reported_without_clearing_image(env, preview):
     window = env.make()
-    output = {"directory": window.photo_dir, "image": window.photo_dir / "reference.png", "preview": preview}
+    output = {"directory": window.photo_dir, "image": window.photo_dir / "reference.png",
+              "preview": preview, "display_error": "CCM constructeur absente"}
     window._capture_success(output)
-    assert window.capture_state.text().startswith("Photo enregistrée, affichage indisponible")
-    assert window.capture_image.text() == "Photo enregistrée, affichage indisponible"
+    assert "rendu/affichage indisponible : CCM constructeur absente" in window.capture_state.text()
+    assert window.capture_image.text() == "Rendu couleur indisponible ; original conservé."
     assert window.open_last_button.isEnabled()
 
 

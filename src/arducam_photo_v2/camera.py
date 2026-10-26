@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ RAW_TRANSPORT = (6000, 9000)
 RAW_IMAGE_SHAPE = (9000, 12000)
 REQUIRED_VALID_FRAMES = 6
 MAX_STABILIZATION_ATTEMPTS = 30
+RAW_BACKEND = "MSMF" if sys.platform == "win32" else DEFAULT_BACKEND
 
 
 class CameraError(RuntimeError):
@@ -107,7 +109,13 @@ def _cv2():
 
 
 def _api(cv2, backend: str) -> int:
-    return getattr(cv2, {"DSHOW": "CAP_DSHOW", "MSMF": "CAP_MSMF", "V4L2": "CAP_V4L2"}[backend])
+    try:
+        return getattr(cv2, {"DSHOW": "CAP_DSHOW", "MSMF": "CAP_MSMF", "V4L2": "CAP_V4L2"}[backend])
+    except (AttributeError, KeyError) as exc:
+        raise CameraOpenError(
+            f"Backend choisi : {backend} ; disponibilité : non. "
+            "Cette API n’est pas présente dans cet environnement OpenCV."
+        ) from exc
 
 
 def require_backend(cv2, backend: str) -> int:
@@ -168,6 +176,33 @@ def resolve_device(expected: CameraDevice, devices: list[CameraDevice]) -> Camer
             "Sélectionnez la bonne caméra dans Preview."
         )
     return matches[0]
+
+
+def resolve_capture_device(expected: CameraDevice, backend: str,
+                           devices: list[CameraDevice]) -> CameraDevice:
+    """Resolve the selected hardware on the mode's explicit capture backend."""
+    if backend == expected.backend:
+        return resolve_device(expected, devices)
+    candidates = [device for device in devices if device.backend == backend]
+    if expected.path:
+        matches = [device for device in candidates if device.path == expected.path]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise CameraSelectionError(f"Caméra ambiguë sur le backend RAW {backend} : {expected.path}.")
+    if expected.name:
+        matches = [device for device in candidates if device.name == expected.name]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise CameraSelectionError(
+                f"Caméra ambiguë sur le backend RAW {backend} : {len(matches)} périphériques nommés "
+                f"{expected.name}. Sélectionnez une caméra identifiable dans Preview."
+            )
+    raise CameraSelectionError(
+        f"Caméra enregistrée absente ou non identifiable sur le backend RAW {backend}. "
+        "Aucun autre backend ni index ne sera essayé."
+    )
 
 
 def open_device(device: CameraDevice):
@@ -355,7 +390,9 @@ def acquire(bank: Bank, capture_id: str, *, device: CameraDevice | None = None, 
     timings: dict[str, float] = {}
     result = failure = release_error = None
     try:
-        device = resolve_device(expected, list_devices(DEFAULT_BACKEND, enumerator=enumerator))
+        capture_backend = RAW_BACKEND if MODES[bank.mode].raw else DEFAULT_BACKEND
+        device = resolve_capture_device(
+            expected, capture_backend, list_devices(capture_backend, enumerator=enumerator))
         cap = (opener or open_device)(device)
         if cap is None or not cap.isOpened():
             raise CameraOpenError(

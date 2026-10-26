@@ -47,7 +47,8 @@ désactivé et les écrans haute résolution. La flèche des listes est l’icô
 
 Prérequis : Windows 11 x64, Python 3.12 x64, accès au pilote Arducam/UVC pour
 les fonctions caméra. Dépendances prises en charge : NumPy `>=1.26,<3`,
-OpenCV headless `>=4.10,<5`, PySide6 Essentials `>=6.7,<7`,
+OpenCV `opencv-python >=4.10,<5` sous Windows (DirectShow et MSMF) ou
+`opencv-python-headless >=4.10,<5` hors Windows, PySide6 Essentials `>=6.7,<7`,
 cv2-enumerate-cameras `>=1.4,<2` (noms et chemins des périphériques). Dans PowerShell,
 depuis la racine du dépôt (aucun chemin de dépôt installé n’est supposé) :
 
@@ -56,6 +57,12 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[test]"
 .\.venv\Scripts\python.exe -m arducam_photo_v2.app
 ```
+
+Pour migrer un environnement Windows existant, le recréer avant l’installation :
+les variantes `opencv-python` et `opencv-python-headless` ne doivent pas être
+installées simultanément. L’application vérifie la disponibilité réelle de
+MSMF au moment d’une capture RAW et s’arrête explicitement s’il manque ; elle
+ne bascule pas sur DirectShow.
 
 L’application démarre sur Preview. Elle ne choisit jamais de caméra
 d’elle-même : la liste « Caméra » présente les périphériques (nom, index
@@ -66,8 +73,12 @@ OpenCV n’est pas une identité : au chargement d’une banque, la caméra est
 retrouvée par son chemin matériel, sinon par son nom ; si elle est absente ou
 ambiguë, une sélection est demandée. La session précédente est toujours
 libérée avant l’ouverture d’un autre périphérique ; jamais deux accès simultanés.
-Sous Windows, DirectShow (`DSHOW`) est utilisé pour l’énumération et l’ouverture,
-après vérification de sa disponibilité dans OpenCV (V4L2 sous Linux).
+Sous Windows, Preview et les captures couleur utilisent DirectShow (`DSHOW`).
+Le RAW 108 MP utilise explicitement Media Foundation (`MSMF`), comme dans la
+démo constructeur ; sous Linux il utilise V4L2. Chaque backend est vérifié avant
+énumération/ouverture, sans repli. Pour le RAW, le périphérique choisi dans
+Preview est retrouvé par chemin matériel ou nom sur MSMF ; un périphérique
+absent ou ambigu arrête la capture.
 Une banque enregistrée avec MSMF ne réimpose pas ce backend : sélectionnez à
 nouveau sa caméra dans Preview puis sauvegardez-la. Aucun index n’est transposé
 d’un backend à l’autre. Capturer exige le même contexte caméra que Preview.
@@ -125,10 +136,13 @@ confirmation. Les banques de l’ancien projet ne sont pas importées.
 | `color_720p` | BGR uint8, 1280 × 720 |
 | `color_4k` | BGR uint8, 3840 × 2160 |
 | `color_12mp` | BGR uint8, 4000 × 3000 |
-| `raw_108mp` | Bayer uint8 reconstruit, 12000 × 9000 ; transport 6000 × 9000 |
+| `raw_108mp` | Bayer uint8 reconstruit, 12000 × 9000 ; transport 6000 × 9000, conversion couleur désactivée |
 
-L’API OpenCV DirectShow est sélectionnée explicitement sous Windows, sans repli. Largeur/hauteur
-et option RAW sont configurées, puis chaque image reçue est validée en type,
+Les captures couleur utilisent l’API OpenCV DirectShow sous Windows ; le RAW
+utilise MSMF explicitement (V4L2 sous Linux). Aucun changement de backend n’est
+tenté en cas d’indisponibilité. Pour le RAW, largeur 6000, hauteur 9000 et
+`CAP_PROP_CONVERT_RGB=0` sont configurés ; les 108 000 000 octets reçus sont
+reconstruits en 9000 × 12000. Chaque image reçue est validée en type,
 forme et nombre d’octets. Une configuration acceptée par le pilote ne suffit
 pas. Une image non conforme ou un mode refusé produit une erreur visible.
 Largeur et hauteur sont relues après l’ensemble des commandes du mode,
@@ -163,8 +177,14 @@ Les modes couleur archivent `reference.png`. Le RAW est archivé sans retouche
 dans `original.raw` avant dématriçage ; `acquisition.json` partage le même
 identifiant de capture et conserve le contexte, les dimensions et retours
 disponibles, les durées, traitements et erreurs. Le rendu RAW de référence
-applique le niveau noir 16, le dématriçage BayerGR2RGB et la correction couleur
-4000 K. En cas d’échec du rendu, l’original et le manifeste restent présents.
+applique le niveau noir 16, le dématriçage constructeur BayerGR2RGB puis la
+CCM interpolée à 4000 K depuis `arducam_108mp.json` à la racine du dépôt. Le
+manifeste enregistre la recette, la température et l’empreinte SHA-256 du fichier ;
+la sortie est BGR, comme attendu par l’encodage PNG et l’interface OpenCV/Qt.
+Ce fichier constructeur fourni localement est ignoré par Git et n’est pas inclus
+dans les paquets. S’il manque ou est invalide, le RAW et le manifeste sont
+conservés, mais le rendu échoue avec une erreur explicite — aucune CCM de
+remplacement n’est utilisée.
 Les noms sont uniques et les fichiers ne sont jamais remplacés.
 
 Après une capture réussie, le rendu apparaît automatiquement dans Capture,
@@ -215,8 +235,10 @@ changer les pics. Il reste à mesurer une séquence réelle sur le PC.
 
 Ouvrir un manifeste d’acquisition JSON ou une image PNG/JPEG enregistrée. Les
 traitements créent un nouveau fichier (PNG/JPEG) et refusent de remplacer la
-source. Les opérations RAW sont dématriçage minimal, niveau noir + dématriçage
-et rendu de référence corrigé. Le panneau source présente un rendu minimal
+source. Les chemins du manifeste sont résolus depuis le dossier du manifeste ;
+les images sont décodées depuis leurs octets pour gérer aussi les chemins
+Windows avec espaces et accents. Les opérations RAW sont dématriçage minimal,
+niveau noir + dématriçage et rendu de référence corrigé. Le panneau source présente un rendu minimal
 clairement nommé : le Bayer original n’est pas une photo couleur. Pour les
 images couleur : niveaux de gris, contraste logiciel, réduction proportionnelle.
 Le contraste de ce panneau ne produit aucune commande caméra.
@@ -321,10 +343,12 @@ produit ici ; il ne valide ni l’exécutable Windows ni les pilotes caméra.
 
 ### Vérifications matérielles restantes
 
-Un essai sur le PC Windows (Python 3.12.10, OpenCV headless 4.14.0.94) a validé
-l’ouverture DirectShow et une lecture couleur de forme `(720, 1280, 3)` alors
-que MSMF y est indisponible. Cela ne valide ni le Focus manuel, ni les captures
-dans les quatre modes, ni les modes 4K, 12 MP ou RAW 108 MP.
+Un essai antérieur sur le PC Windows (Python 3.12.10, OpenCV headless
+4.14.0.94) a validé l’ouverture DirectShow et une lecture couleur de forme
+`(720, 1280, 3)`, mais MSMF y était indisponible. Après recréation de
+l’environnement avec la dépendance Windows déclarée ici, la disponibilité MSMF
+doit encore être vérifiée sur ce PC. Cela ne valide ni le Focus manuel, ni les
+captures dans les quatre modes, ni les modes 4K, 12 MP ou RAW 108 MP.
 
 Les essais simulés ne valident ni le pilote, ni la prise en charge des formats,
 ni la convention physique de Bayer, ni la netteté/couleur. Sur Windows et la

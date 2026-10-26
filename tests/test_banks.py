@@ -33,9 +33,16 @@ def test_invalid_bank_not_accepted(mode, focus):
 
 def test_invalid_camera_context_rejected():
     with pytest.raises(ValueError):
-        Bank.draft("x", "color_720p", 1, CameraDevice("DSHOW", 0, "cam"))
+        Bank.draft("x", "color_720p", 1, CameraDevice("UNKNOWN", 0, "cam"))
     with pytest.raises(ValueError):
         Bank.draft("x", "color_720p", 1, CameraDevice("MSMF", -1, "cam"))
+
+
+def test_directshow_camera_is_persisted_without_changing_bank_settings(tmp_path):
+    store = BankStore(tmp_path / "banks.sqlite3")
+    device = replace(DEVICE, backend="DSHOW", index=3)
+    saved = store.create(Bank.draft("DirectShow", "color_4k", 321, device))
+    assert store.get(saved.id) == saved
 
 
 def test_undefined_focus_remains_undefined():

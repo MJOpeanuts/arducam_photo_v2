@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .config import Bank, CameraDevice, MODES
+from .config import DEFAULT_BACKEND, Bank, CameraDevice, MODES
 
 RAW_BYTES = 108_000_000
 RAW_TRANSPORT = (6000, 9000)
@@ -107,7 +107,17 @@ def _cv2():
 
 
 def _api(cv2, backend: str) -> int:
-    return {"MSMF": cv2.CAP_MSMF, "V4L2": cv2.CAP_V4L2}[backend]
+    return getattr(cv2, {"DSHOW": "CAP_DSHOW", "MSMF": "CAP_MSMF", "V4L2": "CAP_V4L2"}[backend])
+
+
+def require_backend(cv2, backend: str) -> int:
+    api = _api(cv2, backend)
+    if not cv2.videoio_registry.hasBackend(api):
+        raise CameraOpenError(
+            f"Backend choisi : {backend} ; disponibilité : non. "
+            "Ce backend est indisponible dans cet environnement OpenCV. Aucun repli ne sera essayé."
+        )
+    return api
 
 
 def _enumerate(cv2, backend: str):
@@ -117,7 +127,9 @@ def _enumerate(cv2, backend: str):
 
 def list_devices(backend: str, *, enumerator=None) -> list[CameraDevice]:
     """Enumerate devices without opening them. Names may be unavailable."""
-    infos = (enumerator or _enumerate)(_cv2(), backend)
+    cv2 = _cv2()
+    require_backend(cv2, backend)
+    infos = (enumerator or _enumerate)(cv2, backend)
     devices = []
     for info in infos:
         name = (getattr(info, "name", None) or "").strip() or None
@@ -131,6 +143,12 @@ def list_devices(backend: str, *, enumerator=None) -> list[CameraDevice]:
 def resolve_device(expected: CameraDevice, devices: list[CameraDevice]) -> CameraDevice:
     """Find the expected hardware; never substitute another device."""
     candidates = [device for device in devices if device.backend == expected.backend]
+    if devices and not candidates:
+        raise CameraSelectionError(
+            f"La caméra enregistrée utilise {expected.backend}, différent du backend choisi "
+            f"({devices[0].backend}). Sélectionnez la caméra dans Preview puis sauvegardez la banque ; "
+            "aucun index ne sera repris d’un autre backend."
+        )
     if expected.path:
         matches = [device for device in candidates if device.path == expected.path]
     elif expected.name:
@@ -154,7 +172,7 @@ def resolve_device(expected: CameraDevice, devices: list[CameraDevice]) -> Camer
 
 def open_device(device: CameraDevice):
     cv2 = _cv2()
-    return cv2.VideoCapture(device.index, _api(cv2, device.backend))
+    return cv2.VideoCapture(device.index, require_backend(cv2, device.backend))
 
 
 def release_device(cap) -> str | None:
@@ -167,10 +185,13 @@ def release_device(cap) -> str | None:
 
 def validate_raw(frame) -> np.ndarray:
     if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8:
-        raise CameraReadError("Le buffer RAW reçu n’est pas un tableau uint8.")
+        raise CameraReadError(
+            f"Le buffer RAW reçu n’est pas un tableau uint8 : "
+            f"forme={getattr(frame, 'shape', None)}, type={getattr(frame, 'dtype', None)}.")
     if frame.size != RAW_BYTES or frame.nbytes != RAW_BYTES:
         raise CameraReadError(
-            f"Buffer RAW invalide : {frame.size} octets reçus, {RAW_BYTES} attendus "
+            f"Buffer RAW invalide : {frame.nbytes} octets reçus, {RAW_BYTES} attendus, "
+            f"forme={frame.shape}, type={frame.dtype} "
             "(transport caméra 6000 × 9000)."
         )
     height, width = RAW_IMAGE_SHAPE
@@ -255,7 +276,10 @@ def _setup(cap, mode: str, focus: int, cv2):
         settings[label] = {"requested": value, "accepted": accepted, "readback": readback,
                            "readback_error": readback_error}
         if not accepted:
-            raise CameraSetupError(f"Le pilote a refusé {label}={value}. Aucun autre mode ne sera essayé.")
+            raise CameraSetupError(
+                f"Étape configuration : le pilote a refusé {label}={value} ; "
+                f"relecture={readback}, erreur de relecture={readback_error}. "
+                "Aucun autre mode ne sera essayé.")
     settings["focus"] = apply_focus(cap, focus, cv2)
     return settings
 
@@ -310,7 +334,7 @@ def stabilize(cap, mode: str, *, required_valid: int = REQUIRED_VALID_FRAMES,
         "Aucune autre résolution ni aucun autre backend n’a été essayé.", stats)
 
 
-def acquire(bank: Bank, capture_id: str, *, opener=None, enumerator=None,
+def acquire(bank: Bank, capture_id: str, *, device: CameraDevice | None = None, opener=None, enumerator=None,
             required_valid: int = REQUIRED_VALID_FRAMES,
             max_attempts: int = MAX_STABILIZATION_ATTEMPTS) -> Acquisition:
     bank.validate()
@@ -318,13 +342,19 @@ def acquire(bank: Bank, capture_id: str, *, opener=None, enumerator=None,
         raise CameraSetupError("La banque ne définit pas de Focus manuel.")
     if bank.camera is None:
         raise CameraSelectionError("La banque ne désigne aucune caméra : sélectionnez-la dans Preview.")
+    expected = device or bank.camera
+    if expected.backend != DEFAULT_BACKEND or bank.camera.identity != expected.identity:
+        raise CameraSelectionError(
+            f"Contexte caméra incompatible avec le backend choisi {DEFAULT_BACKEND}. "
+            "Sélectionnez la caméra dans Preview puis sauvegardez la banque."
+        )
     GATE.claim("capture")
     cap = None
     started = time.monotonic()
     timings: dict[str, float] = {}
     result = failure = release_error = None
     try:
-        device = resolve_device(bank.camera, list_devices(bank.camera.backend, enumerator=enumerator))
+        device = resolve_device(expected, list_devices(DEFAULT_BACKEND, enumerator=enumerator))
         cap = (opener or open_device)(device)
         if cap is None or not cap.isOpened():
             raise CameraOpenError(

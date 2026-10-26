@@ -6,8 +6,8 @@ from uuid import uuid4
 
 FOCUS_MIN = 0
 FOCUS_MAX = 1023
-BACKENDS = ("MSMF", "V4L2")
-DEFAULT_BACKEND = "MSMF" if sys.platform == "win32" else "V4L2"
+BACKENDS = ("DSHOW", "MSMF", "V4L2")
+DEFAULT_BACKEND = "DSHOW" if sys.platform == "win32" else "V4L2"
 
 
 @dataclass(frozen=True)

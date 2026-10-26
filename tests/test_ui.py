@@ -5,7 +5,7 @@ import cv2
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
@@ -37,6 +37,7 @@ class FakeWorker(QObject):
         super().__init__(parent)
         self.session_id, self.device = session_id, device
         self.commands, self.started, self._stopping = [], False, False
+        self.terminal_error = None
         FakeWorker.created.append(self)
 
     @property
@@ -82,6 +83,7 @@ def env(tmp_path, monkeypatch, qapp):
         window._dirty = lambda: False
         window.hide()
         window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def choose(window, device):
@@ -184,6 +186,86 @@ def test_explicit_refresh_keeps_moved_camera_and_refuses_absent_one(env, qapp):
     assert window.session_device is None and window.camera_combo.currentIndex() == 0
     assert "absente" in window.preview_status.text()
     assert env.workers[0].stopping
+
+
+def test_terminal_failure_waits_for_manual_restart_across_refresh_tabs_and_focus(env, qapp):
+    window = env.make()
+    window.refresh_devices()
+    choose(window, ARDUCAM)
+    first = env.workers[0]
+    first.terminal_error = "Étape lecture : aucune image. Relancer le Preview."
+    first.end()
+    assert window.preview_worker is None
+    assert "Étape lecture" in window.preview_status.text()
+    window._dirty = lambda: False
+    window.refresh_devices()
+    window.tabs.setCurrentIndex(2)
+    window.tabs.setCurrentIndex(0)
+    window.resend_focus()
+    choose(window, WEBCAM)
+    assert len(env.workers) == 1
+    window.restart_preview()
+    assert len(env.workers) == 2 and env.workers[1].device == WEBCAM
+
+
+def test_manual_restart_waits_for_finished_release(env, qapp):
+    window = env.make()
+    window.refresh_devices()
+    choose(window, ARDUCAM)
+    first = env.workers[0]
+    window.restart_preview()
+    assert first.stopping and len(env.workers) == 1
+    first.end()
+    assert len(env.workers) == 2
+
+
+def test_loading_msmf_bank_never_changes_backend(env, qapp, monkeypatch):
+    monkeypatch.setattr(ui, "DEFAULT_BACKEND", "DSHOW")
+    current = replace(ARDUCAM, backend="DSHOW", index=4)
+    env.devices[:] = [current]
+    saved = env.store.create(Bank.draft("Ancienne", "color_4k", 512,
+                                       replace(ARDUCAM, backend="MSMF", index=1)))
+    calls = []
+    monkeypatch.setattr(ui, "list_devices", lambda backend: calls.append(backend) or list(env.devices))
+    window = env.make()
+    window._work_selected(window.work_selector.findData(saved.id))
+    assert calls == ["DSHOW"] and env.workers == []
+    assert window.session_device is None and "autre backend" in window.preview_status.text()
+    choose(window, current)
+    assert env.workers[0].device == current
+    assert (window.work_bank.mode, window.work_bank.focus) == ("color_4k", 512)
+    assert env.store.get(saved.id) == saved  # no silent bank migration
+
+
+def test_capture_failure_cannot_trigger_preview_reopen(env, qapp, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
+    window = env.make()
+    window.refresh_devices()
+    choose(window, ARDUCAM)
+    first = env.workers[0]
+    window._dirty = lambda: False
+    window.tabs.setCurrentIndex(1)
+    first.end()
+    window._capture_failure("Étape stabilisation : forme (720, 1280, 3), 4K attendue.")
+    window._capture_finished()
+    window.tabs.setCurrentIndex(0)
+    assert len(env.workers) == 1
+    assert "4K attendue" in window.preview_details.toPlainText()
+    window.restart_preview()
+    assert len(env.workers) == 2
+
+
+def test_capture_refuses_bank_with_different_preview_camera(env, qapp, monkeypatch):
+    saved = env.store.create(Bank.draft("Autre caméra", "color_720p", 10, WEBCAM))
+    window = env.make()
+    window.session_device = ARDUCAM
+    window._capture_bank_id = saved.id
+    window._update_capture_bank()
+    assert not window.photo_button.isEnabled()
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
+    monkeypatch.setattr(window, "_start_task", lambda task: pytest.fail("must not capture"))
+    window.take_photo()
+    assert window._task is None
 
 
 # ------------------------------------------------------------------ focus
@@ -352,13 +434,15 @@ def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
     saved = env.store.create(Bank.draft("Capture exacte", "color_12mp", 701, ARDUCAM))
     window = env.make()
     window._capture_bank_id = saved.id
+    window.session_device = ARDUCAM
     window.work_bank = replace(saved, mode="raw_108mp", focus=2, camera=WEBCAM)
     captured = []
 
     class RecordingTask:
-        def __init__(self, bank, photo_dir):
+        def __init__(self, bank, photo_dir, device):
             self.bank = bank
             self.photo_dir = photo_dir
+            self.device = device
             self.signals = ui.TaskSignals()
 
     monkeypatch.setattr(ui, "CaptureTask", RecordingTask)
@@ -366,6 +450,7 @@ def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
     window.take_photo()
     assert captured == [window._task]
     assert window._task.bank == saved
+    assert window._task.device == ARDUCAM
     assert (window._task.bank.mode, window._task.bank.focus, window._task.bank.camera) == (
         "color_12mp", 701, ARDUCAM)
 
@@ -401,7 +486,7 @@ def test_capture_release_error_archives_pixels_and_reports(tmp_path, monkeypatch
     bank = Bank.draft("Planche", "color_720p", 300, ARDUCAM)
     pixels = np.full((720, 1280, 3), 40, np.uint8)
 
-    def failing_release(frozen, capture_id):
+    def failing_release(frozen, capture_id, *, device=None):
         camera.GATE.claim("capture")
         camera.GATE.release("release refused")
         return camera.Acquisition(pixels, "color_720p", 300, True, 300, pixels.shape, "uint8",
@@ -430,6 +515,11 @@ class CV:
     CAP_PROP_FOCUS = 13
 
 
+@pytest.fixture
+def preview_devices(monkeypatch):
+    monkeypatch.setattr(ui, "list_devices", lambda backend: [ARDUCAM])
+
+
 class Cap:
     def __init__(self, release_error=None):
         self.calls, self.worker, self.release_error = [], None, release_error
@@ -453,18 +543,73 @@ class Cap:
             raise OSError(self.release_error)
 
 
-def test_preview_worker_opens_without_focus_unless_requested(monkeypatch):
+def test_preview_worker_opens_without_focus_unless_requested(monkeypatch, preview_devices):
     cap = Cap()
     worker = ui.PreviewWorker("session", ARDUCAM)
     cap.worker = worker
     monkeypatch.setattr(ui, "_cv2", lambda: CV)
     monkeypatch.setattr(ui, "open_device", lambda device: cap)
+    statuses = []
+    worker.status.connect(lambda token, message: statuses.append(message))
     worker.run()
     assert cap.calls == [(CV.CAP_PROP_FRAME_WIDTH, 1280), (CV.CAP_PROP_FRAME_HEIGHT, 720)]
     assert camera.GATE.owner is None and camera.GATE.fault is None
+    assert any("disponibilité : oui" in message and "Caméra résolue" in message for message in statuses)
+    assert any("(720, 1280, 3)" in message for message in statuses)
 
 
-def test_preview_worker_applies_requested_focus_once_tagged_with_session(monkeypatch):
+@pytest.mark.parametrize("failure", ["open", "read", "invalid", "exception"])
+def test_preview_terminal_errors_release_once_without_reopening(monkeypatch, preview_devices, failure):
+    class BrokenCap(Cap):
+        released = 0
+        reads = 0
+
+        def isOpened(self):
+            return failure != "open"
+
+        def read(self):
+            self.reads += 1
+            if failure == "exception":
+                raise OSError("USB disconnected")
+            if failure == "invalid":
+                return True, np.zeros((4, 6, 3), np.uint8)
+            return False, None
+
+        def release(self):
+            self.released += 1
+
+    cap = BrokenCap()
+    opened = []
+    worker = ui.PreviewWorker("session", ARDUCAM)
+    monkeypatch.setattr(ui, "_cv2", lambda: CV)
+    monkeypatch.setattr(ui, "open_device", lambda device: opened.append(device) or cap)
+    monkeypatch.setattr(worker, "msleep", lambda ms: None)
+    statuses = []
+    worker.status.connect(lambda token, message: statuses.append(message))
+    worker.run()
+    assert opened == [ARDUCAM] and cap.released == 1
+    assert camera.GATE.owner is None and camera.GATE.fault is None
+    assert worker.terminal_error and "Relancer le Preview" in statuses[-1]
+    assert cap.reads == (0 if failure == "open" else 1 if failure == "exception"
+                         else camera.MAX_STABILIZATION_ATTEMPTS)
+    if failure == "invalid":
+        assert "(4, 6, 3)" in worker.terminal_error
+
+
+def test_preview_reresolves_index_before_opening(monkeypatch):
+    moved = replace(ARDUCAM, index=4)
+    cap = Cap()
+    worker = ui.PreviewWorker("session", ARDUCAM)
+    cap.worker = worker
+    opened = []
+    monkeypatch.setattr(ui, "_cv2", lambda: CV)
+    monkeypatch.setattr(ui, "list_devices", lambda backend: [moved])
+    monkeypatch.setattr(ui, "open_device", lambda device: opened.append(device) or cap)
+    worker.run()
+    assert opened == [moved] and worker.device == moved
+
+
+def test_preview_worker_applies_requested_focus_once_tagged_with_session(monkeypatch, preview_devices):
     cap = Cap()
     worker = ui.PreviewWorker("session-A", ARDUCAM)
     cap.worker = worker
@@ -479,7 +624,7 @@ def test_preview_worker_applies_requested_focus_once_tagged_with_session(monkeyp
     assert results[0][:3] == ("session-A", 2, 140) and results[0][3]["accepted"] is True
 
 
-def test_preview_worker_drops_commands_after_stop(monkeypatch):
+def test_preview_worker_drops_commands_after_stop(monkeypatch, preview_devices):
     cap = Cap()
     worker = ui.PreviewWorker("session", ARDUCAM)
     cap.worker = worker
@@ -492,7 +637,7 @@ def test_preview_worker_drops_commands_after_stop(monkeypatch):
     assert worker.take_unapplied() == (1, 300)
 
 
-def test_preview_release_error_faults_gate(monkeypatch):
+def test_preview_release_error_faults_gate(monkeypatch, preview_devices):
     cap = Cap(release_error="device stuck")
     worker = ui.PreviewWorker("session", ARDUCAM)
     cap.worker = worker

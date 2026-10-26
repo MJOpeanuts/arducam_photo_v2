@@ -205,13 +205,13 @@ def test_read_exceptions_count_as_failed_reads(small_camera):
 
 def test_rejected_focus_fails_and_releases(small_camera):
     cap = FakeCap([], reject=FakeCV.CAP_PROP_FOCUS)
-    with pytest.raises(camera.CameraSetupError, match="focus"):
+    with pytest.raises(camera.CameraSetupError, match="[Ff]ocus"):
         camera.acquire(bank(focus=21), "id", opener=lambda d: cap, enumerator=enumerator_for(ARDUCAM))
     assert cap.released == 1
 
 
 def test_undefined_focus_never_reaches_camera(small_camera):
-    with pytest.raises(camera.CameraSetupError, match="focus"):
+    with pytest.raises(camera.CameraSetupError, match="[Ff]ocus"):
         camera.acquire(bank(focus=None), "id", opener=lambda d: pytest.fail("must not open camera"))
 
 

@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<9"]
+test = ["pytest>=8,<9", "pillow>=10"]
 build = ["pyinstaller>=6.10,<7", "pillow>=10"]
 
 [project.gui-scripts]

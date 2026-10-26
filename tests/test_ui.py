@@ -100,6 +100,12 @@ def test_three_tabs_header_logo_footer_and_touch_targets(env, qapp):
     window.show()
     qapp.processEvents()
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Preview", "Capture", "Traitement"]
+    assert window.mode_combo.accessibleName() == "Mode d’acquisition"
+    assert window.focus_slider.accessibleName() == "Focus manuel"
+    assert window.save_bank_button.text() == "Sauvegarder la banque"
+    assert "Banque utilisée pour la capture" in window.capture_selector.accessibleName()
+    assert "720p" in window.preview_disclaimer.text()
+    assert "champ de vue" in window.preview_disclaimer.text()
     assert window.logo.pixmap() is not None and not window.logo.pixmap().isNull()
     assert not window.powered_by.pixmap().isNull()
     assert not window.windowIcon().isNull()
@@ -236,6 +242,8 @@ def test_loading_bank_applies_focus_to_active_preview(env, qapp):
     window.work_selector.setCurrentIndex(index)
     window._work_selected(index)
     assert worker.commands == [(window._focus_seq, 512)] and len(env.workers) == 1
+    assert window.mode_combo.currentData() == "color_4k"
+    assert window.focus_value.text() == "512"
     assert "512" in window.focus_command_status.text() and "envoyée" in window.focus_command_status.text()
     window._focus_result(worker.session_id, window._focus_seq, 512, {"accepted": True, "readback": 510})
     assert "acceptée" in window.focus_command_status.text() and "relecture 510" in window.focus_command_status.text()
@@ -307,7 +315,8 @@ def test_saved_bank_is_selected_in_capture_and_kept_across_tabs(env, qapp, monke
     env.workers[0].end()           # PHOTO only once the Preview session is released
     assert window.capture_selector.currentData() == saved_id
     summary = window.capture_summary.text()
-    assert "Nouvelle bank" in summary and "333" in summary and "Arducam" in summary
+    assert "Nouvelle banque" in summary and "333" in summary and "Arducam" in summary
+    assert "Focus manuel" in summary and "color_720p" in summary
     assert window.photo_button.isEnabled() and len(env.workers) == 1
     window.reload_banks()
     window.tabs.setCurrentIndex(2)
@@ -337,6 +346,28 @@ def test_unsaved_changes_prompt_is_kept(env, qapp, monkeypatch):
     window.tabs.setCurrentIndex(1)
     assert window.tabs.currentIndex() == 0
     assert asked and {"Sauvegarder", "Abandonner", "Rester"} <= set(asked[0])
+
+
+def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
+    saved = env.store.create(Bank.draft("Capture exacte", "color_12mp", 701, ARDUCAM))
+    window = env.make()
+    window._capture_bank_id = saved.id
+    window.work_bank = replace(saved, mode="raw_108mp", focus=2, camera=WEBCAM)
+    captured = []
+
+    class RecordingTask:
+        def __init__(self, bank, photo_dir):
+            self.bank = bank
+            self.photo_dir = photo_dir
+            self.signals = ui.TaskSignals()
+
+    monkeypatch.setattr(ui, "CaptureTask", RecordingTask)
+    monkeypatch.setattr(window, "_start_task", captured.append)
+    window.take_photo()
+    assert captured == [window._task]
+    assert window._task.bank == saved
+    assert (window._task.bank.mode, window._task.bank.focus, window._task.bank.camera) == (
+        "color_12mp", 701, ARDUCAM)
 
 
 # ------------------------------------------------------------------ fault

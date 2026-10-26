@@ -549,7 +549,8 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
         self.camera_combo = QComboBox()
-        self.camera_combo.setToolTip("Caméra utilisée par le Preview et enregistrée dans la bank")
+        self.camera_combo.setAccessibleName("Caméra")
+        self.camera_combo.setToolTip("Caméra utilisée par le Preview et enregistrée dans la banque")
         self.camera_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.camera_combo.setMinimumContentsLength(10)
         self.camera_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -558,13 +559,16 @@ class MainWindow(QMainWindow):
         self.refresh_cameras_button.setToolTip("Actualiser la liste des caméras")
         self.refresh_cameras_button.clicked.connect(self.refresh_devices)
         self.work_selector = QComboBox()
-        self.work_selector.setToolTip("Charger une bank sauvegardée (applique son focus)")
+        self.work_selector.setAccessibleName("Banque")
+        self.work_selector.setToolTip("Charger une banque sauvegardée (applique son Focus manuel)")
         self.work_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.work_selector.setMinimumContentsLength(8)
         self.work_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.work_selector.activated.connect(self._work_selected)
+        toolbar.addWidget(QLabel("Caméra"))
         toolbar.addWidget(self.camera_combo, 3)
         toolbar.addWidget(self.refresh_cameras_button)
+        toolbar.addWidget(QLabel("Banque"))
         toolbar.addWidget(self.work_selector, 3)
         stage.addLayout(toolbar)
         self.preview_image = ImageView("Recherche des caméras…")
@@ -572,6 +576,11 @@ class MainWindow(QMainWindow):
         self.preview_status = _muted("Aperçu de cadrage inactif.", wrap=False)
         self.preview_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         stage.addWidget(self.preview_status)
+        self.preview_disclaimer = _muted(
+            "Aperçu de cadrage 720p : le mode et le champ de vue de la photo peuvent différer.",
+            wrap=False)
+        self.preview_disclaimer.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        stage.addWidget(self.preview_disclaimer)
         layout.addLayout(stage, 1)
 
         self.preview_panel = QStackedWidget()
@@ -601,17 +610,21 @@ class MainWindow(QMainWindow):
         self.preview_details_toggle.clicked.connect(lambda: self.preview_panel.setCurrentIndex(1))
         head.addWidget(self.preview_details_toggle)
         form.addLayout(head)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode d’acquisition"))
         self.mode_combo = QComboBox()
-        self.mode_combo.setToolTip("Mode d’acquisition de la bank")
+        self.mode_combo.setAccessibleName("Mode d’acquisition")
+        self.mode_combo.setToolTip("Mode d’acquisition de la future capture")
         for key, descriptor in MODES.items():
             self.mode_combo.addItem(descriptor.label, key)
         self.mode_combo.activated.connect(self._mode_changed)
-        form.addWidget(self.mode_combo)
+        mode_row.addWidget(self.mode_combo, 1)
+        form.addLayout(mode_row)
         focus_row = QHBoxLayout()
         focus_row.setSpacing(6)
         self.focus_minus = _button("−")
         self.focus_plus = _button("+")
-        for button, label in ((self.focus_minus, "Focus −1"), (self.focus_plus, "Focus +1")):
+        for button, label in ((self.focus_minus, "Focus manuel −1"), (self.focus_plus, "Focus manuel +1")):
             button.setFixedWidth(56)
             button.setAutoRepeat(False)
             button.setToolTip(label)
@@ -621,11 +634,12 @@ class MainWindow(QMainWindow):
         self.focus_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.focus_value.setMinimumWidth(70)
         self.focus_input = _button("Saisir")
-        self.focus_input.setToolTip("Saisir la consigne de focus (0–1023)")
+        self.focus_input.setAccessibleName("Saisir le Focus manuel")
+        self.focus_input.setToolTip("Saisir le Focus manuel (entier de 0 à 1023)")
         self.focus_minus.clicked.connect(lambda: self.adjust_focus(-1))
         self.focus_plus.clicked.connect(lambda: self.adjust_focus(1))
         self.focus_input.clicked.connect(self.enter_focus)
-        focus_caption = QLabel("Focus")
+        focus_caption = QLabel("Focus manuel")
         focus_caption.setStyleSheet("font-weight:600")
         focus_row.addWidget(focus_caption)
         focus_row.addWidget(self.focus_minus)
@@ -634,6 +648,7 @@ class MainWindow(QMainWindow):
         focus_row.addWidget(self.focus_input)
         form.addLayout(focus_row)
         self.focus_slider = TouchSlider()
+        self.focus_slider.setAccessibleName("Focus manuel")
         self.focus_slider.setRange(FOCUS_MIN, FOCUS_MAX)
         self.focus_slider.setSingleStep(1)
         self.focus_slider.setPageStep(16)
@@ -644,20 +659,20 @@ class MainWindow(QMainWindow):
         self.focus_command_status = _muted()
         self.focus_command_status.setMinimumHeight(40)
         self.focus_resend = _button("Renvoyer")
-        self.focus_resend.setToolTip("Renvoyer la même consigne au Preview")
+        self.focus_resend.setToolTip("Renvoyer la même consigne de Focus manuel au Preview")
         self.focus_resend.clicked.connect(self.resend_focus)
         status_row.addWidget(self.focus_command_status, 1)
         status_row.addWidget(self.focus_resend)
         form.addLayout(status_row)
         actions = QHBoxLayout()
         actions.setSpacing(6)
-        self.save_bank_button = _button("Sauvegarder", primary=True)
+        self.save_bank_button = _button("Sauvegarder la banque", primary=True)
         self.save_bank_button.clicked.connect(self.save_work_bank)
         self.new_bank_button = _button("Nouvelle")
-        self.new_bank_button.setToolTip("Nouvelle bank")
+        self.new_bank_button.setToolTip("Créer une nouvelle banque")
         self.new_bank_button.clicked.connect(self.create_draft)
         self.work_name_button = _button("Nommer")
-        self.work_name_button.setToolTip("Renommer la bank de travail")
+        self.work_name_button.setToolTip("Renommer la banque de travail")
         self.work_name_button.clicked.connect(self.rename_work_bank)
         actions.addWidget(self.save_bank_button, 2)
         actions.addWidget(self.new_bank_button, 1)
@@ -681,12 +696,13 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(body)
         column.setContentsMargins(0, 0, 4, 0)
         for text in (
-            "Aperçu de cadrage en 720p ; la bank choisit le mode photo. Champ de vue et netteté "
+            "Aperçu de cadrage en 720p uniquement ; la banque choisit le Mode d’acquisition photo. "
+            "Champ de vue et netteté "
             "peuvent varier selon le mode.",
-            "Focus : consigne moteur entière de 0 à 1023, sans unité ni distance. Le curseur envoie au "
+            "Focus manuel : entier de 0 à 1023, sans unité ni distance. Le curseur envoie au "
             "relâchement, la saisie à la validation. Une commande acceptée ne signifie pas une mise "
             "au point réussie : vérifiez la netteté sur l’image.",
-            "Caméra : l’index OpenCV n’est pas un identifiant stable. La bank enregistre le chemin du "
+            "Caméra : l’index OpenCV n’est pas un identifiant stable. La banque enregistre le chemin du "
             "périphérique et son nom ; si la caméra attendue est absente ou ambiguë, une sélection est demandée.",
         ):
             column.addWidget(_muted(text))
@@ -717,10 +733,14 @@ class MainWindow(QMainWindow):
         left.setContentsMargins(14, 10, 14, 12)
         left.setSpacing(8)
         self.capture_selector = QComboBox()
-        self.capture_selector.setToolTip("Bank sauvegardée utilisée par PHOTO")
+        capture_heading = QLabel("Banque utilisée pour la capture")
+        capture_heading.setObjectName("heading")
+        left.addWidget(capture_heading)
+        self.capture_selector.setAccessibleName("Banque utilisée pour la capture")
+        self.capture_selector.setToolTip("Sélectionner une banque sauvegardée pour PHOTO")
         self.capture_selector.activated.connect(self._capture_bank_changed)
         left.addWidget(self.capture_selector)
-        self.capture_summary = QLabel("Sélectionnez une bank complète.")
+        self.capture_summary = QLabel("Sélectionnez une banque complète.")
         self.capture_summary.setWordWrap(True)
         self.capture_summary.setTextFormat(Qt.TextFormat.RichText)
         left.addWidget(self.capture_summary)
@@ -755,7 +775,7 @@ class MainWindow(QMainWindow):
         folder_row.addWidget(self.open_folder_button)
         folder_row.addWidget(self.open_last_button)
         left.addLayout(folder_row)
-        self.preview_link = _button("Préparer une bank dans Preview")
+        self.preview_link = _button("Préparer une banque dans Preview")
         self.preview_link.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
         left.addWidget(self.preview_link)
         layout.addWidget(card)
@@ -1001,7 +1021,8 @@ class MainWindow(QMainWindow):
         self.focus_slider.setValue(focus if focus is not None else FOCUS_MIN)
         self.focus_slider.blockSignals(False)
         self.focus_value.setText(str(focus) if focus is not None else "—")
-        self.focus_value.setToolTip("Focus non défini" if focus is None else f"Consigne {focus} / 1023")
+        self.focus_value.setToolTip(
+            "Focus manuel non défini" if focus is None else f"Focus manuel : consigne {focus} / 1023")
         self.focus_minus.setEnabled(focus is not None and focus > FOCUS_MIN)
         self.focus_plus.setEnabled(focus is not None and focus < FOCUS_MAX)
         self._render_focus_status()
@@ -1012,7 +1033,7 @@ class MainWindow(QMainWindow):
         value = report.get("value")
         detail = report.get("report", {})
         if state == "none" or value is None:
-            text = ("Focus non défini : touchez le curseur, ± ou Saisir."
+            text = ("Focus manuel non défini : touchez le curseur, ± ou Saisir."
                     if self.work_bank.focus is None else "Aucune consigne envoyée.")
         elif state == "sent":
             text = f"Consigne {value} envoyée — en attente du pilote."
@@ -1072,7 +1093,7 @@ class MainWindow(QMainWindow):
             self._send_focus(self.work_bank.focus)
 
     def enter_focus(self):
-        keyboard = TouchKeyboard("Consigne de focus (0–1023)",
+        keyboard = TouchKeyboard("Focus manuel (0–1023)",
                                  "" if self.work_bank.focus is None else str(self.work_bank.focus),
                                  numeric=True, parent=self)
         if keyboard.exec() != QDialog.DialogCode.Accepted:
@@ -1089,13 +1110,14 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- banks
     @staticmethod
     def _empty_draft() -> Bank:
-        return Bank.draft("Nouvelle bank", "color_720p", None)
+        return Bank.draft("Nouvelle banque", "color_720p", None)
 
     @staticmethod
     def _bank_item(bank: Bank) -> str:
         descriptor = MODES[bank.mode]
         focus = "—" if bank.focus is None else bank.focus
-        return f"{bank.name}  ·  {descriptor.width}×{descriptor.height}  ·  focus {focus}"
+        return (f"{bank.name}  ·  Mode d’acquisition : {descriptor.width}×{descriptor.height}"
+                f"  ·  Focus manuel : {focus}")
 
     def reload_banks(self):
         """Rebuild both lists while preserving each current selection."""
@@ -1103,8 +1125,8 @@ class MainWindow(QMainWindow):
         known = {bank.id for bank in banks}
         if self._capture_bank_id not in known:
             self._capture_bank_id = None
-        wanted = ((self.work_selector, self.saved_bank.id if self.saved_bank else None, "Charger une bank…"),
-                  (self.capture_selector, self._capture_bank_id, "Choisir une bank…"))
+        wanted = ((self.work_selector, self.saved_bank.id if self.saved_bank else None, "Charger une banque…"),
+                  (self.capture_selector, self._capture_bank_id, "Choisir une banque…"))
         for combo, selected, placeholder in wanted:
             combo.blockSignals(True)
             combo.clear()
@@ -1123,7 +1145,7 @@ class MainWindow(QMainWindow):
         self._update_dirty()
 
     def _work_selected(self, index: int):
-        """Explicit bank load: syncs the controls, then applies the bank focus."""
+        """Explicit bank load: syncs the controls, then applies its manual focus."""
         bank_id = self.work_selector.itemData(index)
         if not bank_id:
             self.reload_banks()
@@ -1134,7 +1156,7 @@ class MainWindow(QMainWindow):
         try:
             bank = self.store.get(bank_id)
         except Exception as exc:
-            self._error("Chargement de la bank", exc)
+            self._error("Chargement de la banque", exc)
             self.reload_banks()
             return
         self.saved_bank = self.work_bank = bank
@@ -1146,7 +1168,7 @@ class MainWindow(QMainWindow):
             try:
                 self.devices = list_devices(bank.camera.backend)
                 self.session_device = resolve_device(bank.camera, self.devices)
-                self._set_preview_message(f"Caméra de la bank : {self.session_device.label}.")
+                self._set_preview_message(f"Caméra de la banque : {self.session_device.label}.")
             except Exception as exc:
                 self.session_device = None
                 self._set_preview_message(f"{exc} Choisissez une caméra.")
@@ -1158,12 +1180,12 @@ class MainWindow(QMainWindow):
     def create_draft(self):
         if not self._resolve_dirty():
             return
-        keyboard = TouchKeyboard("Nom de la bank", parent=self)
+        keyboard = TouchKeyboard("Nom de la banque", parent=self)
         if keyboard.exec() != QDialog.DialogCode.Accepted:
             return
         name = keyboard.value().strip()
         if not name:
-            QMessageBox.warning(self, "Nom manquant", "Saisissez un nom de bank.")
+            QMessageBox.warning(self, "Nom manquant", "Saisissez un nom de banque.")
             return
         self.saved_bank = None
         self._initial_empty_draft = False
@@ -1173,7 +1195,7 @@ class MainWindow(QMainWindow):
         self.refresh_work_controls()
 
     def rename_work_bank(self):
-        keyboard = TouchKeyboard("Nom de la bank", self.work_bank.name, parent=self)
+        keyboard = TouchKeyboard("Nom de la banque", self.work_bank.name, parent=self)
         if keyboard.exec() == QDialog.DialogCode.Accepted:
             name = keyboard.value().strip()
             if name:
@@ -1199,9 +1221,9 @@ class MainWindow(QMainWindow):
     def _update_dirty(self):
         dirty = self._dirty()
         if self.saved_bank is None:
-            label = "Nouvelle bank non sauvegardée" if dirty else "Brouillon vide"
+            label = "Nouvelle banque non sauvegardée" if dirty else "Brouillon vide"
         else:
-            label = "Modifications non sauvegardées" if dirty else f"Sauvegardée · révision {self.saved_bank.revision}"
+            label = "Modifications non sauvegardées" if dirty else f"Banque sauvegardée · révision {self.saved_bank.revision}"
         self.work_title.setText(self.work_bank.name)
         self.work_title.setToolTip(self.work_bank.name)
         self.dirty_label.setText(label)
@@ -1211,8 +1233,8 @@ class MainWindow(QMainWindow):
         if not self._dirty():
             return True
         choice = QMessageBox(self)
-        choice.setWindowTitle("Modifications non enregistrées")
-        choice.setText(f"Que faire des modifications de « {self.work_bank.name} » ?")
+        choice.setWindowTitle("Modifications non sauvegardées")
+        choice.setText(f"Que faire des modifications de la banque « {self.work_bank.name} » ?")
         save = choice.addButton("Sauvegarder", QMessageBox.ButtonRole.AcceptRole)
         discard = choice.addButton("Abandonner", QMessageBox.ButtonRole.DestructiveRole)
         stay = choice.addButton("Rester", QMessageBox.ButtonRole.RejectRole)
@@ -1239,8 +1261,8 @@ class MainWindow(QMainWindow):
                 saved = self.store.create(self.work_bank)
             else:
                 answer = QMessageBox.question(
-                    self, "Remplacer la bank sauvegardée ?",
-                    f"La bank « {self.saved_bank.name} » sera remplacée (révision suivante).",
+                    self, "Remplacer la banque sauvegardée ?",
+                    f"La banque « {self.saved_bank.name} » sera remplacée (révision suivante).",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel,
                 )
@@ -1248,7 +1270,7 @@ class MainWindow(QMainWindow):
                     return False
                 saved = self.store.save(self.work_bank, self.saved_bank.revision)
         except Exception as exc:
-            self._error("Sauvegarde impossible", exc)
+            self._error("Sauvegarde de la banque impossible", exc)
             return False
         self.saved_bank = self.work_bank = saved
         self._initial_empty_draft = False
@@ -1284,28 +1306,28 @@ class MainWindow(QMainWindow):
         try:
             bank = self.store.get(bank_id) if bank_id else None
             if bank is None:
-                self.capture_summary.setText("Aucune bank sélectionnée.")
-                self.capture_reason.setText("Choisissez une bank sauvegardée, ou préparez-en une dans Preview.")
+                self.capture_summary.setText("Aucune banque sélectionnée.")
+                self.capture_reason.setText("Choisissez une banque sauvegardée, ou préparez-en une dans Preview.")
             else:
                 descriptor = MODES[bank.mode]
                 focus = "non défini" if bank.focus is None else f"{bank.focus} / 1023"
                 camera = bank.camera.name or bank.camera.path if bank.camera else "non définie"
                 self.capture_summary.setText(
                     f"<div style='font-size:20px;font-weight:700'>{_escape(bank.name)}</div>"
-                    f"<div>{_escape(descriptor.label)}</div>"
-                    f"<div><b>Focus</b> {focus} <span style='color:#66717C'>(consigne)</span></div>"
+                    f"<div><b>Mode d’acquisition</b> : {_escape(descriptor.label)}</div>"
+                    f"<div><b>Focus manuel</b> {focus} <span style='color:#66717C'>(consigne)</span></div>"
                     f"<div><b>Caméra</b> {_escape(camera)}</div>"
                     f"<div style='color:#66717C'>Révision {bank.revision}</div>")
-                missing = [label for label, value in (("focus", bank.focus), ("caméra", bank.camera))
+                missing = [label for label, value in (("Focus manuel", bank.focus), ("caméra", bank.camera))
                            if value is None]
                 if missing:
                     self.capture_reason.setText(
-                        f"Bank incomplète ({', '.join(missing)}) : complétez-la dans Preview puis sauvegardez.")
+                        f"Banque incomplète ({', '.join(missing)}) : complétez-la dans Preview puis sauvegardez.")
                 else:
                     ready = True
-                    self.capture_reason.setText("PHOTO utilise une copie figée de cette bank sauvegardée.")
+                    self.capture_reason.setText("PHOTO utilise une copie figée de cette banque sauvegardée.")
         except Exception as exc:
-            self.capture_summary.setText("La bank sélectionnée est invalide.")
+            self.capture_summary.setText("La banque sélectionnée est invalide.")
             self.capture_reason.setText(str(exc))
         if GATE.fault:
             self.capture_reason.setText("Caméra en défaut : redémarrez l’application.")
@@ -1325,9 +1347,9 @@ class MainWindow(QMainWindow):
         try:
             frozen = self.store.get(self._capture_bank_id)
             if frozen.focus is None or frozen.camera is None:
-                raise ValueError("Cette bank ne définit pas de focus ou de caméra.")
+                raise ValueError("Cette banque ne définit pas de Focus manuel ou de caméra.")
         except Exception as exc:
-            self._error("Bank inutilisable", exc)
+            self._error("Banque inutilisable", exc)
             return
         self._busy_capture = True
         self.photo_button.setEnabled(False)
@@ -1361,7 +1383,8 @@ class MainWindow(QMainWindow):
         reading = "relecture indisponible" if readback is None else f"relecture {readback:g}"
         self.capture_state.setText(
             f"Capture enregistrée : {output['directory']}\n"
-            f"Focus {output['focus_requested']} — commande acceptée, {reading} ; netteté non vérifiée.{release}"
+            f"Focus manuel {output['focus_requested']} — commande acceptée, {reading} ; "
+            f"netteté non vérifiée.{release}"
         )
         image = output.get("preview")
         if image is not None:

@@ -49,7 +49,10 @@ def test_color_archive_manifest_and_no_overwrite(tmp_path):
     archived = processing.archive_capture(acquisition, bank, tmp_path)
     manifest = json.loads(archived["manifest"].read_text(encoding="utf-8"))
     assert manifest["configuration_used"]["mode"] == bank.mode
+    assert manifest["configuration_used"]["mode_label"] == processing.MODES[bank.mode].label
+    assert manifest["configuration_used"]["requested_focus"] == bank.focus
     assert manifest["bank"]["focus"] == bank.focus
+    assert manifest["bank"]["name"] == bank.name and manifest["bank"]["id"] == bank.id
     assert manifest["camera"]["received_shape"] == [720, 1280, 3]
     assert manifest["camera"]["stabilization"] == STATS
     assert manifest["configuration_used"]["camera"]["path"] == "usb#arducam"
@@ -64,6 +67,14 @@ def test_color_archive_manifest_and_no_overwrite(tmp_path):
         processing.load_source(archived["manifest"])
     with pytest.raises(FileExistsError):
         processing.archive_capture(acquisition, bank, tmp_path)
+
+
+def test_archive_rejects_parameters_not_used_from_frozen_bank(tmp_path):
+    acquisition, bank = _color_capture()
+    different = Bank.draft(bank.name, "color_4k", bank.focus, DEVICE)
+    with pytest.raises(ValueError, match="ne correspondent pas"):
+        processing.archive_capture(acquisition, different, tmp_path)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_processing_failure_keeps_archived_original(tmp_path, monkeypatch):

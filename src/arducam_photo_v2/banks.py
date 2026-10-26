@@ -33,7 +33,7 @@ class BankStore:
             if self.path.exists():
                 for suffix in ("", "-journal", "-wal", "-shm"):
                     Path(f"{self.path}{suffix}").unlink(missing_ok=True)
-                self.reset_notice = ("Réglages réinitialisés : les anciennes banks de développement "
+                self.reset_notice = ("Réglages réinitialisés : les anciennes banques de développement "
                                      "ne sont pas reprises. Les photos ne sont pas concernées.")
             self._create()
 
@@ -85,7 +85,7 @@ class BankStore:
         with self._connect() as db:
             row = db.execute("SELECT * FROM banks WHERE id=?", (bank_id,)).fetchone()
         if row is None:
-            raise KeyError("Cette bank n’existe plus.")
+            raise KeyError("Cette banque n’existe plus.")
         return self._decode(row)
 
     def create(self, bank: Bank) -> Bank:
@@ -105,5 +105,5 @@ class BankStore:
                 "WHERE id=? AND revision=?",
                 (*values[1:], datetime.now(timezone.utc).isoformat(), updated.id, expected_revision))
             if cursor.rowcount != 1:
-                raise RuntimeError("La bank a changé depuis son chargement ; rechargez-la avant de sauvegarder.")
+                raise RuntimeError("La banque a changé depuis son chargement ; rechargez-la avant de sauvegarder.")
         return updated

@@ -315,9 +315,9 @@ def acquire(bank: Bank, capture_id: str, *, opener=None, enumerator=None,
             max_attempts: int = MAX_STABILIZATION_ATTEMPTS) -> Acquisition:
     bank.validate()
     if bank.focus is None:
-        raise CameraSetupError("La bank ne définit pas de consigne de focus.")
+        raise CameraSetupError("La banque ne définit pas de Focus manuel.")
     if bank.camera is None:
-        raise CameraSelectionError("La bank ne désigne aucune caméra : sélectionnez-la dans Preview.")
+        raise CameraSelectionError("La banque ne désigne aucune caméra : sélectionnez-la dans Preview.")
     GATE.claim("capture")
     cap = None
     started = time.monotonic()
@@ -336,8 +336,8 @@ def acquire(bank: Bank, capture_id: str, *, opener=None, enumerator=None,
         focus = settings["focus"]
         if focus["accepted"] is not True:
             raise CameraSetupError(
-                f"Le pilote a refusé la consigne de focus {bank.focus}."
-                if focus["accepted"] is False else f"Erreur de commande focus : {focus.get('error')}"
+                f"Le pilote a refusé le Focus manuel {bank.focus}."
+                if focus["accepted"] is False else f"Erreur de commande du Focus manuel : {focus.get('error')}"
             )
         setup_done = time.monotonic()
         image, frame, stats = stabilize(cap, bank.mode, required_valid=required_valid,

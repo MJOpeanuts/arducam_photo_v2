@@ -1,13 +1,13 @@
 # Arducam Photo v2
 
 Application locale Windows 11 x64 pour la caméra Arducam B0494C. Elle comporte
-trois onglets intégrés — **Preview**, **Capture**, **Traitement** — et ne pilote
-que le focus manuel. Elle n’ouvre ni navigateur ni serveur.
+trois onglets intégrés — **Preview**, **Capture**, **Traitement** — et configure
+le Mode d’acquisition et le Focus manuel. Elle n’ouvre ni navigateur ni serveur.
 
 ## État de livraison
 
 Le dépôt contient une application Python/PySide6 exécutable, quatre modes de
-capture strictement validés, les banks locales, l’archivage des originaux et les
+capture strictement validés, les banques locales, l’archivage des originaux et les
 traitements hors caméra. Les tests automatiques utilisent une caméra simulée ;
 aucun essai sur Arducam ou pilote Windows n’a été effectué dans cet environnement.
 
@@ -56,31 +56,31 @@ L’application démarre sur Preview. Elle ne choisit jamais de caméra
 d’elle-même : la liste « Caméra » présente les périphériques (nom, index
 OpenCV actuel, chemin matériel en info-bulle) ; « Actualiser » relance
 l’énumération. L’aperçu permet de vérifier visuellement le choix. La caméra
-choisie est enregistrée dans la bank (backend, nom, chemin matériel). L’index
-OpenCV n’est pas une identité : au chargement d’une bank, la caméra est
+choisie est enregistrée dans la banque (backend, nom, chemin matériel). L’index
+OpenCV n’est pas une identité : au chargement d’une banque, la caméra est
 retrouvée par son chemin matériel, sinon par son nom ; si elle est absente ou
 ambiguë, une sélection est demandée. La session précédente est toujours
 libérée avant l’ouverture d’un autre périphérique ; jamais deux accès simultanés.
 
 Le mode d’aperçu est un transport couleur
-720p indépendant du mode sauvegardé dans la bank. L’aperçu se libère en quittant
+720p indépendant du Mode d’acquisition sauvegardé dans la banque. L’aperçu se libère en quittant
 Preview. Capture n’ouvre pas de flux au repos ; Traitement ne possède aucun
 chemin d’accès à la caméra.
 
-## Interface et banks
+## Interface et banques
 
 Les cibles tactiles utilisent des dimensions minimales de 48 pixels logiques et
 les curseurs/boutons ont des zones élargies. La boîte de dialogue intégrée
-permet de saisir un nom ou un focus sans clavier physique. Qt 6 suit la mise à
+permet de saisir un nom ou un Focus manuel sans clavier physique. Qt 6 suit la mise à
 l’échelle Windows ; la géométrie est exprimée en pixels logiques. Les facteurs
 Windows 100 %, 125 % et 150 % restent à vérifier sur un écran tactile réel.
 
-Le focus est une consigne entière de 0 à 1023, sans unité physique ni calibration.
-La valeur reste « Focus non défini » tant que l’utilisateur n’en choisit pas une.
+Le Focus manuel est un entier de 0 à 1023, sans unité physique ni calibration.
+La valeur reste « Focus manuel non défini » tant que l’utilisateur n’en choisit pas une.
 Le curseur (zone tactile réelle de 56 px de haut) envoie au relâchement, la
 saisie numérique à la validation ; − et + sont actifs dès la première consigne.
-Seule la dernière consigne en attente est transmise. Charger une bank applique
-son focus au Preview actif ; sans Preview actif, la consigne est appliquée à
+Seule la dernière consigne en attente est transmise. Charger une banque applique
+son Focus manuel au Preview actif ; sans Preview actif, la consigne est appliquée à
 l’ouverture de la session suivante. Les synchronisations d’affichage n’envoient
 aucune commande. « Renvoyer » retransmet la même valeur après un refus. Les
 résultats d’une ancienne session ou d’une consigne dépassée sont ignorés. Le
@@ -88,13 +88,15 @@ rapport de commande, son acceptation/refus, la relecture et l’effet optique so
 distincts ; une commande acceptée ne signifie pas une mise au point réussie.
 Les explications et le journal sont dans « Détails ».
 
-La bank sauvegardée est séparée de la copie de travail ; elle contient le mode
-photo, le focus, le contexte caméra, son identifiant et sa révision. Après
-sauvegarde, la bank reste sélectionnée dans Capture, qui affiche son nom, son
-mode, son focus et sa caméra ; les sélections survivent aux rechargements et
-changements d’onglet. Capture relit une bank sauvegardée puis en fige une copie. Modifier
-n’enregistre rien, sauvegarder ne prend aucune photo. Le remplacement demande
-confirmation. Les banks ne sont pas importées de l’ancien projet.
+La banque sauvegardée est séparée de la copie de travail ; elle contient son
+identifiant et son nom, la caméra, le Mode d’acquisition, le Focus manuel et les
+informations techniques de stockage. Après sauvegarde, la banque reste
+sélectionnée dans Capture, qui affiche son nom, sa caméra, son Mode d’acquisition
+et son Focus manuel ;
+les sélections survivent aux rechargements et changements d’onglet. Capture
+relit une banque sauvegardée puis en fige une copie. Modifier n’enregistre rien,
+« Sauvegarder la banque » ne prend aucune photo. Le remplacement demande
+confirmation. Les banques de l’ancien projet ne sont pas importées.
 
 ## Modes d’acquisition
 
@@ -110,8 +112,8 @@ et option RAW sont configurées, puis chaque image reçue est validée en type,
 forme et nombre d’octets. Une configuration acceptée par le pilote ne suffit
 pas. Une image non conforme ou un mode refusé produit une erreur visible.
 
-Au déclenchement : la bank est figée, sa caméra est retrouvée, ouverte et
-configurée, le focus est appliqué, puis une stabilisation bornée lit au plus
+Au déclenchement : la banque est figée, sa caméra est retrouvée, ouverte et
+configurée, le Focus manuel est appliqué, puis une stabilisation bornée lit au plus
 30 images. Lectures échouées, buffers non conformes (images transitoires après
 changement de résolution) et images valides sont comptés séparément ; il faut
 six images valides consécutives, la dernière est conservée. Si la limite est
@@ -144,7 +146,7 @@ Le contraste de ce panneau ne produit aucune commande caméra.
 
 ## Stockage
 
-- Banks et données d’application : `%LOCALAPPDATA%\ArducamPhotoV2\banks.sqlite3`.
+- Banques et données d’application : `%LOCALAPPDATA%\ArducamPhotoV2\banks.sqlite3`.
   Ce stockage de réglages a changé de format : une base antérieure ou illisible
   est réinitialisée (réglages vides) et un avis est affiché en pied de page.
   Aucun import des anciens réglages ; photos, RAW et manifestes ne sont jamais
@@ -187,7 +189,7 @@ produit ici ; il ne valide ni l’exécutable Windows ni les pilotes caméra.
 Les essais simulés ne valident ni le pilote, ni la prise en charge des formats,
 ni la convention physique de Bayer, ni la netteté/couleur. Sur Windows et la
 B0494C, vérifier séparément les quatre modes (USB 3 requis pour RAW), les formes
-des buffers, la commande/relecture du focus, le rendu avec mire couleur, le
+des buffers, la commande/relecture du Focus manuel, le rendu avec mire couleur, le
 champ de vue et la netteté en mode photo, les captures successives et la
 libération caméra. Vérifier aussi : noms/chemins listés par MSMF et
 correspondance avec l’index OpenCV, débranchement/rebranchement et deux

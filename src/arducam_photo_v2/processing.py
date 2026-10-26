@@ -98,6 +98,10 @@ def _write_manifest(path: Path, manifest: dict, *, create: bool = False) -> None
 
 def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path) -> dict:
     """Archive original pixels first; a render error never removes the acquisition."""
+    bank.validate()
+    if (acquisition.mode != bank.mode or acquisition.focus_requested != bank.focus
+            or bank.camera is None or acquisition.device.identity != bank.camera.identity):
+        raise ValueError("Les paramètres acquis ne correspondent pas à la banque figée.")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     capture_dir = root / acquisition.capture_id
@@ -126,7 +130,8 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
         "status": "original_archived",
         "bank": bank.snapshot(),
         "configuration_used": {
-            "mode": acquisition.mode, "requested_focus": acquisition.focus_requested,
+            "mode": acquisition.mode, "mode_label": descriptor.label,
+            "requested_focus": acquisition.focus_requested,
             "camera": asdict(acquisition.device),
         },
         "camera": {

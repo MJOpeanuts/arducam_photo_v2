@@ -20,10 +20,10 @@ class Mode:
 
 
 MODES = {
-    "color_720p": Mode("color_720p", "Couleur — 1280 × 720", 1280, 720),
-    "color_4k": Mode("color_4k", "Couleur — 3840 × 2160", 3840, 2160),
-    "color_12mp": Mode("color_12mp", "Couleur — 4000 × 3000", 4000, 3000),
-    "raw_108mp": Mode("raw_108mp", "RAW Bayer — 12000 × 9000", 12000, 9000, True),
+    "color_720p": Mode("color_720p", "color_720p — couleur 1280 × 720", 1280, 720),
+    "color_4k": Mode("color_4k", "color_4k — couleur 3840 × 2160", 3840, 2160),
+    "color_12mp": Mode("color_12mp", "color_12mp — couleur 4000 × 3000", 4000, 3000),
+    "raw_108mp": Mode("raw_108mp", "raw_108mp — Bayer reconstruit 12000 × 9000", 12000, 9000, True),
 }
 
 
@@ -77,19 +77,19 @@ class Bank:
 
     def validate(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("Identifiant de bank manquant.")
+            raise ValueError("Identifiant de banque manquant.")
         if not isinstance(self.name, str) or not self.name.strip():
-            raise ValueError("Le nom de la bank ne peut pas être vide.")
+            raise ValueError("Le nom de la banque ne peut pas être vide.")
         if self.mode not in MODES:
             raise ValueError(f"Mode d’acquisition inconnu : {self.mode}.")
         if self.focus is not None and (type(self.focus) is not int or not FOCUS_MIN <= self.focus <= FOCUS_MAX):
-            raise ValueError("Le focus doit être un entier compris entre 0 et 1023.")
+            raise ValueError("Le Focus manuel doit être un entier compris entre 0 et 1023.")
         if self.camera is not None:
             if not isinstance(self.camera, CameraDevice):
                 raise ValueError("Contexte caméra invalide.")
             self.camera.validate()
         if type(self.revision) is not int or self.revision < 1:
-            raise ValueError("Révision de bank invalide.")
+            raise ValueError("Révision de banque invalide.")
 
     def snapshot(self) -> dict:
         self.validate()

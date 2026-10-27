@@ -78,6 +78,18 @@ def good():
     return np.zeros((8, 12, 3), np.uint8)
 
 
+def test_full_size_raw_contract_without_truncation_or_channel_extraction():
+    transport = np.broadcast_to(np.uint8(42), (9000, 6000, 2))
+    result = camera.validate_raw(transport)
+    assert result.shape == (9000, 12000)
+    assert result.dtype == np.uint8 and result.nbytes == 108_000_000
+    assert result.flags.owndata
+    invalid_rgb = np.broadcast_to(np.uint8(42), (9000, 6000, 3))
+    assert invalid_rgb.nbytes == 162_000_000
+    with pytest.raises(camera.CameraReadError, match="162000000"):
+        camera.validate_raw(invalid_rgb)
+
+
 @pytest.mark.parametrize("mode,shape", [
     ("color_720p", (8, 12, 3)), ("color_4k", (8, 12, 3)),
     ("color_12mp", (8, 12, 3)), ("raw_108mp", (9, 12)),

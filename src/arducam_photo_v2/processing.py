@@ -4,10 +4,10 @@ import hashlib
 import json
 import math
 import os
+import sys
 import time
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -19,7 +19,6 @@ from .config import Bank, MODES
 _RGB_TO_YUV = np.array([[0.299, 0.587, 0.114], [-0.169, -0.331, 0.500], [0.500, -0.419, -0.081]])
 _YUV_TO_RGB = np.array([[1.0, 0.0, 1.402], [1.0, -0.345, -0.714], [1.0, 1.771, 0.0]])
 REFERENCE_CCT = 4000
-RAW_IMAGE_SHAPE = (9000, 12000)
 REFERENCE_RECIPE = [
     "soustraction saturante du niveau noir 16",
     "dématriçage BayerGR2RGB",
@@ -37,7 +36,8 @@ def project_root() -> Path:
 
 
 def correction_file() -> Path:
-    return project_root() / "arducam_108mp.json"
+    root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else project_root()
+    return root / "arducam_108mp.json"
 
 
 def _finite_coefficient(value) -> bool:
@@ -120,28 +120,17 @@ def raw_demosaic(raw: np.ndarray, black_level: int = 16, reference: bool = False
     return image
 
 
-def process_color(image: np.ndarray, operation: str, value: int = 0) -> np.ndarray:
+def reduce_image(image: np.ndarray, maximum: int) -> np.ndarray:
     if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("L’image couleur doit être au format BGR uint8.")
-    if operation == "original":
+    if type(maximum) is not int or maximum < 1:
+        raise ValueError("La dimension maximale doit être positive.")
+    height, width = image.shape[:2]
+    ratio = min(1., maximum / max(width, height))
+    if ratio == 1:
         return image.copy()
-    if operation == "gray":
-        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    if operation == "contrast":
-        if type(value) is not int or not -100 <= value <= 100:
-            raise ValueError("Le contraste doit être compris entre -100 et 100.")
-        factor = (259 * (value + 255)) / (255 * (259 - value))
-        return np.clip(factor * (image.astype(np.float32) - 128) + 128, 0, 255).astype(np.uint8)
-    if operation == "reduce":
-        if type(value) is not int or value < 1:
-            raise ValueError("La dimension maximale doit être positive.")
-        height, width = image.shape[:2]
-        ratio = min(1., value / max(width, height))
-        if ratio == 1:
-            return image.copy()
-        return cv2.resize(image, (max(1, round(width * ratio)), max(1, round(height * ratio))),
-                          interpolation=cv2.INTER_AREA)
-    raise ValueError("Traitement couleur inconnu.")
+    return cv2.resize(image, (max(1, round(width * ratio)), max(1, round(height * ratio))),
+                      interpolation=cv2.INTER_AREA)
 
 
 def _write_new(path: Path, data: bytes) -> dict:
@@ -169,7 +158,10 @@ def _write_manifest(path: Path, manifest: dict, *, create: bool = False) -> None
         temporary.unlink(missing_ok=True)
 
 
-def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path) -> dict:
+def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path, *,
+                    sequence_id: str | None = None, sequence_position: int = 1,
+                    sequence_count: int = 1, object_id: str | None = None,
+                    object_description: str | None = None) -> dict:
     """Archive original pixels first; a render error never removes the acquisition."""
     bank.validate()
     same_camera = bank.camera is not None and acquisition.device.identity == bank.camera.identity
@@ -193,7 +185,7 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
     if descriptor.raw:
         if image.shape != (descriptor.height, descriptor.width) or image.dtype != np.uint8:
             raise ValueError(f"RAW reconstruit invalide : {image.shape}, {image.dtype}.")
-        original_record = _write_new(capture_dir / "original.raw", image.tobytes(order="C"))
+        original_record = _write_new(capture_dir / f"{acquisition.capture_id}.raw", image.tobytes(order="C"))
         original_record.update(width=descriptor.width, height=descriptor.height, dtype="uint8", format="Bayer")
     else:
         if image.shape != (descriptor.height, descriptor.width, 3) or image.dtype != np.uint8:
@@ -201,13 +193,16 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
         ok, encoded = cv2.imencode(".png", image)
         if not ok:
             raise OSError("OpenCV n’a pas pu encoder la référence PNG.")
-        original_record = _write_new(capture_dir / "reference.png", encoded.tobytes())
+        original_record = _write_new(capture_dir / f"{acquisition.capture_id}.png", encoded.tobytes())
         original_record.update(width=descriptor.width, height=descriptor.height, dtype="uint8", format="BGR PNG")
     original_write_s = time.monotonic() - original_started
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "capture_id": acquisition.capture_id,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "sequence": {"id": sequence_id or acquisition.capture_id,
+                     "position": sequence_position, "count": sequence_count},
+        "captured_at": acquisition.captured_at,
+        "object": {"id": object_id, "description": object_description},
         "status": "original_archived",
         "bank": bank.snapshot(),
         "configuration_used": {
@@ -216,12 +211,15 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
             "camera": asdict(acquisition.device),
         },
         "camera": {
+            "device": asdict(acquisition.device),
             "focus_requested": acquisition.focus_requested,
             "focus_command_accepted": acquisition.focus_accepted,
             "focus_readback": acquisition.focus_readback,
             "focus_readback_note": "Une relecture n’atteste pas de l’effet optique.",
             "settings": acquisition.settings,
             "received_shape": acquisition.received_shape, "dtype": acquisition.dtype,
+            "received_format": "Bayer uint8" if descriptor.raw else "BGR uint8",
+            "received_nbytes": int(image.nbytes),
             "stabilization": acquisition.stabilization,
             "released_before_processing": acquisition.released,
             "release_error": acquisition.release_error,
@@ -233,6 +231,7 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
                 "steps": REFERENCE_RECIPE,
                 "ccm_temperature_kelvin": REFERENCE_CCT,
                 "ccm_file": "arducam_108mp.json",
+                "ccm_path": str(correction_file()),
                 "ccm_sha256": None,
                 "demosaic_output_order": "BGR, as expected by OpenCV PNG encoding and the application UI",
             } if descriptor.raw else None),
@@ -242,7 +241,7 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
     }
     if acquisition.release_error:
         manifest["errors"].append({"stage": "camera_release", "message": acquisition.release_error})
-    manifest_path = capture_dir / "acquisition.json"
+    manifest_path = capture_dir / f"{acquisition.capture_id}.json"
     manifest_started = time.monotonic()
     _write_manifest(manifest_path, manifest, create=True)
     manifest["processing"]["durations_seconds"]["initial_manifest_s"] = time.monotonic() - manifest_started
@@ -253,16 +252,18 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
             manifest["processing"]["reference_recipe"]["ccm_sha256"] = ccm_config[1]
             render = raw_demosaic(image, 16, reference=True, ccm_config=ccm_config)
             manifest["processing"]["steps"] = REFERENCE_RECIPE.copy()
-            render_name = "reference-color.png"
+            render_name = f"{acquisition.capture_id}.png"
         else:
             render = image
             manifest["processing"]["steps"] = ["référence couleur sans perte"]
-            render_name = "reference.png"
+            render_name = f"{acquisition.capture_id}.png"
         if descriptor.raw:
             ok, encoded = cv2.imencode(".png", render)
             if not ok:
                 raise OSError("OpenCV n’a pas pu encoder le rendu PNG.")
             manifest["render"] = _write_new(capture_dir / render_name, encoded.tobytes())
+            manifest["render"].update(width=descriptor.width, height=descriptor.height,
+                                      dtype="uint8", format="BGR PNG")
         else:
             manifest["render"] = original_record
         manifest["processing"]["durations_seconds"]["render_s"] = time.monotonic() - render_started
@@ -288,52 +289,3 @@ def archive_capture(acquisition: Acquisition, bank: Bank, output_dir: str | Path
             "raw": descriptor.raw, "focus_requested": acquisition.focus_requested,
             "focus_command_accepted": acquisition.focus_accepted,
             "focus_readback": acquisition.focus_readback, "release_error": acquisition.release_error}
-
-
-def load_source(path: str | Path) -> tuple[np.ndarray, bool, str]:
-    """Read saved files only. A JSON acquisition manifest identifies its original."""
-    source = Path(path)
-    if source.suffix.lower() == ".json":
-        manifest = json.loads(source.read_text(encoding="utf-8"))
-        original = manifest["original"]
-        target = (source.parent / original["path"]).resolve()
-        if not target.is_relative_to(source.parent.resolve()):
-            raise ValueError("Le manifeste référence un fichier hors de son dossier.")
-        payload = target.read_bytes()
-        if len(payload) != original["size_bytes"]:
-            raise ValueError("La taille de l’original ne correspond pas au manifeste.")
-        if hashlib.sha256(payload).hexdigest() != original["sha256"]:
-            raise ValueError("La somme de contrôle de l’original ne correspond pas au manifeste.")
-        if original["format"] == "Bayer":
-            width, height = original["width"], original["height"]
-            if len(payload) != width * height or (height, width) != RAW_IMAGE_SHAPE:
-                raise ValueError("Dimensions du Bayer RAW incorrectes.")
-            return np.frombuffer(payload, np.uint8).reshape(height, width).copy(), True, str(source)
-        image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError("L’image d’acquisition ne peut pas être décodée.")
-        return image, False, str(source)
-    try:
-        payload = source.read_bytes()
-    except OSError as exc:
-        raise ValueError(f"Fichier illisible. Choisissez une image PNG ou JPEG enregistrée : {exc}") from exc
-    image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise ValueError("Fichier illisible. Choisissez une image PNG ou JPEG enregistrée.")
-    return image, False, str(source)
-
-
-def save_processed(image: np.ndarray, source_path: str | Path, destination: str | Path) -> Path:
-    target = Path(destination)
-    if target.resolve() == Path(source_path).resolve():
-        raise ValueError("Le résultat ne peut pas remplacer la source.")
-    if target.suffix.lower() not in (".png", ".jpg", ".jpeg"):
-        raise ValueError("Choisissez une extension PNG ou JPEG.")
-    ok, encoded = cv2.imencode(target.suffix.lower(), image)
-    if not ok:
-        raise OSError("Impossible d’encoder le résultat.")
-    with target.open("xb") as stream:
-        stream.write(encoded.tobytes())
-        stream.flush()
-        os.fsync(stream.fileno())
-    return target

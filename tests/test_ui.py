@@ -1,16 +1,14 @@
 import json
 import time
 from dataclasses import replace
-from pathlib import Path
 
 import cv2
 
 import numpy as np
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QSize, Qt, QThread, Signal
-from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from arducam_photo_v2 import app as ui
 from arducam_photo_v2 import camera
@@ -99,122 +97,6 @@ def all_commands(workers):
 
 
 # ---------------------------------------------------------------- general
-
-def test_three_tabs_header_logo_footer_and_touch_targets(env, qapp):
-    window = env.make()
-    window.show()
-    qapp.processEvents()
-    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Preview", "Capture", "Traitement"]
-    assert window.mode_combo.accessibleName() == "Mode d’acquisition"
-    assert window.focus_slider.accessibleName() == "Focus manuel"
-    assert window.save_bank_button.text() == "Sauvegarder la banque"
-    assert "Banque utilisée pour la capture" in window.capture_selector.accessibleName()
-    assert "720p" in window.preview_disclaimer.text()
-    assert "champ de vue" in window.preview_disclaimer.text()
-    assert window.logo.pixmap() is not None and not window.logo.pixmap().isNull()
-    assert not window.powered_by.pixmap().isNull()
-    assert not window.windowIcon().isNull()
-    for button in window.findChildren(QPushButton):
-        assert button.minimumHeight() >= ui.TOUCH_MIN or button.height() >= ui.TOUCH_MIN, button.text()
-    assert window.preview_image.text() and not window.preview_image.has_image()
-
-
-@pytest.mark.parametrize("size", [(1280, 800), (1920, 1080), (1024, 577)])
-def test_focus_and_save_visible_without_scrolling(env, qapp, size):
-    window = env.make()
-    window.resize(*size)
-    window.show()
-    qapp.processEvents()
-    for widget in (window.camera_combo, window.refresh_cameras_button, window.work_selector,
-                   window.focus_minus, window.focus_plus, window.focus_input, window.focus_slider,
-                   window.focus_resend, window.save_bank_button):
-        rect = widget.visibleRegion().boundingRect()
-        assert rect.size() == widget.size(), widget.objectName() or widget
-    assert window.preview_image.width() > window.focus_slider.width()
-
-
-def test_small_viewport_scrolls_controls_without_horizontal_overflow(env, qapp):
-    window = env.make()
-    window.resize(853, 470)
-    window.show()
-    qapp.processEvents()
-    scroll = window.preview_panel.widget(0)
-    assert isinstance(scroll, QScrollArea)
-    assert scroll.horizontalScrollBar().maximum() == 0
-    for widget in (window.focus_slider, window.focus_resend, window.save_bank_button):
-        scroll.ensureWidgetVisible(widget)
-        qapp.processEvents()
-        assert widget.visibleRegion().boundingRect().size() == widget.size()
-
-
-def test_small_capture_keeps_summary_complete_and_actions_reachable(env, qapp):
-    bank = env.store.create(Bank.draft("Planche couleur", "color_4k", 512, ARDUCAM))
-    window = env.make()
-    window.work_bank = window.saved_bank = bank
-    window.session_device = ARDUCAM
-    window._capture_bank_id = bank.id
-    window.tabs.setCurrentIndex(1)
-    window.resize(853, 533)
-    window.show()
-    qapp.processEvents()
-    assert window.capture_summary.height() >= window.capture_summary.heightForWidth(window.capture_summary.width())
-    assert window.photo_button.visibleRegion().boundingRect().size() == window.photo_button.size()
-    scroll = next(area for area in window.capture_page.findChildren(QScrollArea)
-                  if area.widget() is window.photo_button.parentWidget())
-    assert scroll.horizontalScrollBar().maximum() == 0
-    for button in (window.choose_folder_button, window.open_folder_button, window.preview_link):
-        scroll.ensureWidgetVisible(button)
-        qapp.processEvents()
-        assert button.visibleRegion().boundingRect().size() == button.size()
-
-
-@pytest.mark.parametrize("size", [(1280, 800), (1920, 1080)])
-def test_presentation_sizes_and_button_labels_on_each_tab(env, qapp, size):
-    window = env.make()
-    window.resize(*size)
-    window.show()
-    qapp.processEvents()
-    assert window.focus_value.font().pixelSize() == 28
-    assert window.work_title.font().pixelSize() == 20
-    assert window.tabs.tabBar().font().family() == window.photo_button.font().family()
-    assert window.photo_button.text() == "Capturer"
-    assert window.photo_button.iconSize().width() == 26
-    assert not window.photo_button.icon().isNull()
-    for tab in range(3):
-        window.tabs.setCurrentIndex(tab)
-        qapp.processEvents()
-        for button in window.tabs.currentWidget().findChildren(QPushButton):
-            if not button.isVisible():
-                continue
-            assert button.width() >= button.sizeHint().width(), button.text()
-            assert button.visibleRegion().boundingRect().size() == button.size(), button.text()
-            assert button.width() >= 48 and button.height() >= 48
-            assert 15 <= button.font().pixelSize() <= 18
-
-
-def test_combo_popup_rows_are_touch_sized(env, qapp):
-    window = env.make()
-    window.show()
-    qapp.processEvents()
-    window.mode_combo.showPopup()
-    qapp.processEvents()
-    for row in range(window.mode_combo.count()):
-        assert window.mode_combo.view().sizeHintForRow(row) >= 48
-    window.mode_combo.hidePopup()
-
-
-def test_long_capture_error_does_not_push_essential_actions_out_of_view(env, qapp, monkeypatch):
-    window = env.make()
-    window.resize(1280, 800)
-    window.show()
-    window.tabs.setCurrentIndex(1)
-    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
-    window._capture_failure("Étape lecture : image non conforme.\n" * 40)
-    qapp.processEvents()
-    for button in (window.photo_button, window.capture_diagnostic_button, window.choose_folder_button,
-                   window.preview_link):
-        assert button.visibleRegion().boundingRect().size() == button.size()
-    assert "image non conforme" in window.preview_details.toPlainText()
 
 
 def test_touch_keyboard_provides_character_and_numeric_keys(qapp):
@@ -329,43 +211,12 @@ def test_loading_msmf_bank_never_changes_backend(env, qapp, monkeypatch):
     assert env.store.get(saved.id) == saved  # no silent bank migration
 
 
-def test_capture_failure_cannot_trigger_preview_reopen(env, qapp, monkeypatch):
-    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
-    window = env.make()
-    window.refresh_devices()
-    choose(window, ARDUCAM)
-    first = env.workers[0]
-    window._dirty = lambda: False
-    window.tabs.setCurrentIndex(1)
-    first.end()
-    window._capture_failure("Étape stabilisation : forme (720, 1280, 3), 4K attendue.")
-    window._capture_finished()
-    window.tabs.setCurrentIndex(0)
-    assert len(env.workers) == 1
-    assert "4K attendue" in window.preview_details.toPlainText()
-    window.restart_preview()
-    assert len(env.workers) == 2
-
-
-def test_capture_refuses_bank_with_different_preview_camera(env, qapp, monkeypatch):
-    saved = env.store.create(Bank.draft("Autre caméra", "color_720p", 10, WEBCAM))
-    window = env.make()
-    window.session_device = ARDUCAM
-    window._capture_bank_id = saved.id
-    window._update_capture_bank()
-    assert not window.photo_button.isEnabled()
-    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
-    monkeypatch.setattr(window, "_start_task", lambda task: pytest.fail("must not capture"))
-    window.take_photo()
-    assert window._task is None
-
-
 # ------------------------------------------------------------------ focus
 
 def test_plus_minus_enabled_immediately_after_first_setpoint(env, qapp):
     window = env.make()
-    assert window.work_bank.focus is None
-    assert not window.focus_minus.isEnabled() and not window.focus_plus.isEnabled()
+    assert window.work_bank.focus == 0
+    assert not window.focus_minus.isEnabled() and window.focus_plus.isEnabled()
     window.focus_slider.setValue(400)
     window._focus_released()
     assert window.focus_minus.isEnabled() and window.focus_plus.isEnabled()
@@ -382,6 +233,7 @@ def test_focus_slider_touch_zone_is_real(env, qapp):
     assert slider.handle_rect().height() >= 40
     choose(window, ARDUCAM)
     worker = env.workers[0]
+    worker.commands.clear()
     # Touch near the top edge of the 48+ px zone, far from the drawn groove.
     point = QPoint(slider.width() * 3 // 4, 3)
     QTest.mousePress(slider, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
@@ -400,9 +252,7 @@ def test_graphic_sync_never_sends_command(env, qapp):
     window.refresh_work_controls()
     window._focus_sync()
     window.reload_banks()
-    window.tabs.setCurrentIndex(2)
-    window.tabs.setCurrentIndex(0)
-    assert all_commands(env.workers) == []
+    assert all_commands(env.workers) == [(1, 0)]
 
 
 def test_loading_bank_applies_focus_to_active_preview(env, qapp):
@@ -411,12 +261,13 @@ def test_loading_bank_applies_focus_to_active_preview(env, qapp):
     window.refresh_devices()
     choose(window, ARDUCAM)
     worker = env.workers[0]
+    worker.commands.clear()
     window.reload_banks()
     index = window.work_selector.findData(saved.id)
     window.work_selector.setCurrentIndex(index)
     window._work_selected(index)
     assert worker.commands == [(window._focus_seq, 512)] and len(env.workers) == 1
-    assert window.mode_combo.currentData() == "color_4k"
+    assert window.work_bank.mode == "color_4k"
     assert window.focus_value.text() == "512"
     assert "512" in window.focus_command_status.text() and "envoyée" in window.focus_command_status.text()
     window._focus_result(worker.session_id, window._focus_seq, 512, {"accepted": True, "readback": 510})
@@ -448,6 +299,7 @@ def test_loading_bank_on_other_camera_switches_session_then_applies(env, qapp):
     window.refresh_devices()
     choose(window, ARDUCAM)
     first = env.workers[0]
+    first.commands.clear()
     window.reload_banks()
     window._work_selected(window.work_selector.findData(saved.id))
     assert first.stopping and first.commands == []
@@ -473,265 +325,6 @@ def test_stale_session_and_sequence_results_are_ignored(env, qapp):
 
 
 # ------------------------------------------------------------------ banks
-
-def test_saved_bank_is_selected_in_capture_and_kept_across_tabs(env, qapp, monkeypatch):
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
-    other = env.store.create(Bank.draft("Autre", "color_720p", 10, WEBCAM))
-    window = env.make()
-    window.refresh_devices()
-    choose(window, ARDUCAM)
-    window.focus_slider.setValue(333)
-    window._focus_released()
-    assert window.save_work_bank()
-    saved_id = window.saved_bank.id
-    window.tabs.setCurrentIndex(1)
-    assert env.workers[0].stopping and not window.photo_button.isEnabled()
-    env.workers[0].end()           # PHOTO only once the Preview session is released
-    assert window.capture_selector.currentData() == saved_id
-    summary = window.capture_summary.text()
-    assert "Nouvelle banque" in summary and "333" in summary and "Arducam" in summary
-    assert "Focus manuel" in summary and "Couleur" in summary and "1280 × 720" in summary
-    assert window.photo_button.isEnabled() and len(env.workers) == 1
-    window.reload_banks()
-    window.tabs.setCurrentIndex(2)
-    window.tabs.setCurrentIndex(1)
-    assert window.capture_selector.currentData() == saved_id
-    assert window.work_selector.currentData() == saved_id
-    touched = window.capture_selector.findData(other.id)
-    window.capture_selector.setCurrentIndex(touched)
-    window.capture_selector.activated.emit(touched)
-    window.tabs.setCurrentIndex(0)
-    window.tabs.setCurrentIndex(1)
-    assert window.capture_selector.currentData() == other.id
-
-
-def test_unsaved_changes_prompt_is_kept(env, qapp, monkeypatch):
-    asked = []
-
-    def fake_exec(box):
-        asked.append([button.text() for button in box.buttons()])
-        box.clickedButton = lambda: [b for b in box.buttons() if b.text() == "Rester"][0]
-        return 0
-
-    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
-    window = env.make()
-    window.focus_slider.setValue(5)
-    window._focus_released()
-    window.tabs.setCurrentIndex(1)
-    assert window.tabs.currentIndex() == 0
-    assert asked and {"Sauvegarder", "Abandonner", "Rester"} <= set(asked[0])
-
-
-def test_capture_task_uses_exact_saved_bank_snapshot(env, qapp, monkeypatch):
-    saved = env.store.create(Bank.draft("Capture exacte", "color_12mp", 701, ARDUCAM))
-    window = env.make()
-    window._capture_bank_id = saved.id
-    window.session_device = ARDUCAM
-    window.work_bank = replace(saved, mode="raw_108mp", focus=2, camera=WEBCAM)
-    captured = []
-
-    class RecordingTask:
-        def __init__(self, bank, photo_dir, device):
-            self.bank = bank
-            self.photo_dir = photo_dir
-            self.device = device
-            self.signals = ui.TaskSignals()
-
-    monkeypatch.setattr(ui, "CaptureTask", RecordingTask)
-    monkeypatch.setattr(window, "_start_task", captured.append)
-    window.take_photo()
-    assert captured == [window._task]
-    assert window._task.bank == saved
-    assert window._task.device == ARDUCAM
-    assert (window._task.bank.mode, window._task.bank.focus, window._task.bank.camera) == (
-        "color_12mp", 701, ARDUCAM)
-    assert not window.photo_button.isEnabled()
-    assert window.photo_button.text() == "Capture en cours…"
-    window.take_photo()
-    assert captured == [window._task]
-    window._task.signals.progress.emit("Backend choisi : V4L2 ; chemin : très long chemin matériel")
-    assert "archivage" in window.capture_state.text()
-    assert "très long chemin matériel" in window.preview_details.toPlainText()
-    preview_restarts = []
-    monkeypatch.setattr(window, "_ensure_preview", lambda: preview_restarts.append(True))
-    window._capture_finished()
-    assert window.photo_button.text() == "Capturer"
-    assert preview_restarts == []
-
-
-@pytest.mark.parametrize("mode", ["color_720p", "color_4k", "color_12mp", "raw_108mp"])
-def test_capture_result_reaches_gui_without_reopening_camera(env, qapp, monkeypatch, tmp_path, mode):
-    # Synthetic acquisitions, including full 12 MP; real archive, decoder, signals and painting.
-    descriptor = ui.MODES[mode]
-    width, height = ((120, 90) if descriptor.raw else
-                     (4000, 3000) if mode == "color_12mp" else (2000, 1200))
-    monkeypatch.setitem(ui.MODES, mode, replace(descriptor, width=width, height=height))
-    bank = env.store.create(Bank.draft("Résultat", mode, 300, ARDUCAM))
-    window = env.make()
-    working = tmp_path / "application"
-    working.mkdir()
-    monkeypatch.chdir(working)
-    window.photo_dir = Path("../Photos été 漢字")
-    window._capture_bank_id = bank.id
-    window.session_device = ARDUCAM
-    window.tabs.setCurrentIndex(1)
-    window.show()
-    calls, gui_threads, loading_threads = [], [], []
-    pixels = np.full((height, width) if descriptor.raw else (height, width, 3), 80, np.uint8)
-    block_h, block_w = height // 5, width // 5
-    for rows, columns, color in (
-        (slice(0, block_h), slice(0, block_w), 30 if descriptor.raw else (20, 80, 160)),
-        (slice(-block_h, None), slice(-block_w, None), 150 if descriptor.raw else (160, 80, 20)),
-    ):
-        pixels[rows, columns] = color
-
-    def acquire(frozen, capture_id, *, device=None):
-        calls.append((frozen, device, QThread.currentThread()))
-        return camera.Acquisition(pixels, mode, 300, True, 300, pixels.shape, "uint8",
-                                  {"attempts": 6}, {}, ARDUCAM, capture_id, True)
-
-    def show(image):
-        gui_threads.append(QThread.currentThread())
-        ui.ImageView.set_qimage(window.capture_image, image)
-
-    monkeypatch.setattr(camera, "acquire", acquire)
-    monkeypatch.setattr(window.capture_image, "set_qimage", show)
-    real_preview = ui.capture_preview
-
-    def load(filename):
-        loading_threads.append(QThread.currentThread())
-        return real_preview(filename)
-
-    monkeypatch.setattr(ui, "capture_preview", load)
-    # Reproduce an OpenCV filename-read failure (notably Unicode paths on Windows).
-    monkeypatch.setattr(ui.cv2, "imread", lambda *args: None)
-    previous = ui.to_qimage(np.full((30, 40, 3), 42, np.uint8))
-    window.capture_image.set_qimage(previous)
-    gui_threads.clear()
-    window.take_photo()
-    window.take_photo()
-    assert window.capture_image._image is previous
-    deadline = time.monotonic() + 10
-    while window._busy_capture and time.monotonic() < deadline:
-        QTest.qWait(10)
-    assert not window._busy_capture
-    assert len(calls) == 1 and calls[0][:2] == (bank, ARDUCAM)
-    assert calls[0][2] != window.thread()
-    assert gui_threads == [window.thread()]
-    assert loading_threads == [calls[0][2]]
-    assert window.tabs.currentIndex() == 1 and env.workers == []
-    assert not window._preview_failed
-    assert window.open_last_button.isEnabled() and window.open_folder_button.isEnabled()
-    image = window.capture_image._image
-    assert isinstance(image, QImage) and not image.isNull()
-    assert (image.width(), image.height()) == (
-        (120, 90) if descriptor.raw else (1600, 1200) if mode == "color_12mp" else (1600, 960))
-    filename = window._last_capture["image"]
-    manifest = json.loads(window._last_capture["manifest"].read_text(encoding="utf-8"))
-    assert manifest["status"] == "complete"
-    assert filename.is_absolute()
-    assert filename == window._last_capture["directory"] / manifest["render"]["path"]
-    assert not Path(manifest["render"]["path"]).is_absolute()
-    if not descriptor.raw:
-        assert manifest["render"]["path"] == manifest["original"]["path"] == "reference.png"
-    original_bytes = filename.read_bytes()
-    assert QImage(str(filename)).size().width() == width
-    assert "Capture enregistrée" in window.capture_state.text()
-    diagnostic = window.preview_details.toPlainText()
-    capture_backend = ui.RAW_BACKEND if descriptor.raw else ui.DEFAULT_BACKEND
-    assert f"Mode {mode} — backend explicitement choisi : {capture_backend}" in diagnostic
-    assert diagnostic.index("Sauvegarde : original archivé, rendu enregistré") < diagnostic.index(
-        "Chargement : lecture") < diagnostic.index("Chargement : image autonome") < diagnostic.index(
-            "Affichage : résultat installé")
-    # The delivered QImage outlives the worker and its temporary decoder buffer.
-    window.pool.waitForDone()
-    window._task = None
-    for size in ((1000, 700), (1400, 700)):
-        window.resize(*size)
-        qapp.processEvents()
-        screenshot = window.capture_image.grab().toImage()
-        fitted = image.size().scaled(window.capture_image.size(), Qt.AspectRatioMode.KeepAspectRatio)
-        left = (screenshot.width() - fitted.width()) // 2
-        top = (screenshot.height() - fitted.height()) // 2
-        assert screenshot.pixelColor(screenshot.width() // 2, screenshot.height() // 2) == image.pixelColor(
-            image.width() // 2, image.height() // 2)
-        if left > 12:
-            assert screenshot.pixelColor(left - 2, screenshot.height() // 2).name().upper() == ui.STAGE
-        if top > 12:
-            assert screenshot.pixelColor(screenshot.width() // 2, top - 2).name().upper() == ui.STAGE
-        for fraction in (0.1, 0.9):
-            assert screenshot.pixelColor(left + int(fitted.width() * fraction),
-                                         top + int(fitted.height() * fraction)) == image.pixelColor(
-                                             int(image.width() * fraction), int(image.height() * fraction))
-        assert window.capture_image._image is image
-    assert filename.read_bytes() == original_bytes
-
-
-@pytest.mark.parametrize("failure", ["decode", "render", "widget", "memory"])
-def test_saved_capture_display_failure_keeps_previous_photo(env, qapp, monkeypatch, tmp_path, failure):
-    from arducam_photo_v2 import processing
-
-    window = env.make()
-    window.tabs.setCurrentIndex(1)
-    previous = ui.to_qimage(np.full((90, 120, 3), 42, np.uint8))
-    window.capture_image.set_qimage(previous)
-    bank = Bank.draft("Enregistrée", "color_720p", 300, ARDUCAM)
-    if failure == "render":
-        monkeypatch.setitem(ui.MODES, "raw_108mp", replace(ui.MODES["raw_108mp"], width=120, height=90))
-        bank = replace(bank, mode="raw_108mp")
-    pixels = np.full((90, 120) if failure == "render" else (720, 1280, 3), 80, np.uint8)
-
-    def acquire(frozen, capture_id, *, device=None):
-        return camera.Acquisition(pixels, bank.mode, 300, True, 300, pixels.shape, "uint8",
-                                  {"attempts": 6}, {}, ARDUCAM, capture_id, True)
-
-    def unavailable(*args, **kwargs):
-        raise OSError("Décodeur indisponible")
-
-    monkeypatch.setattr(camera, "acquire", acquire)
-    if failure in ("decode", "render"):
-        monkeypatch.setattr(ui if failure == "decode" else processing,
-                            "capture_preview" if failure == "decode" else "raw_demosaic", unavailable)
-    elif failure == "widget":
-        def widget_unavailable(image):
-            raise RuntimeError("Widget indisponible")
-        monkeypatch.setattr(window.capture_image, "set_qimage", widget_unavailable)
-    else:
-        def memory_unavailable(filename):
-            raise MemoryError("Mémoire indisponible")
-        monkeypatch.setattr(ui, "capture_preview", memory_unavailable)
-    task = ui.CaptureTask(bank, tmp_path)
-    failures, finished, opened = [], [], []
-    task.signals.success.connect(window._capture_success)
-    task.signals.progress.connect(window.preview_details.append)
-    task.signals.failure.connect(failures.append)
-    task.signals.finished.connect(lambda: finished.append(True))
-    monkeypatch.setattr(ui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
-    task.run()
-    assert failures == [] and finished == [True]
-    assert window.capture_state.text().startswith("Original enregistré ; rendu/affichage indisponible")
-    diagnostic = window.preview_details.toPlainText()
-    assert {"decode": "Décodeur", "render": "Décodeur", "widget": "Widget", "memory": "Mémoire"}[failure] in diagnostic
-    assert "Sauvegarde :" in diagnostic and "Affichage :" in diagnostic
-    if failure in ("decode", "memory"):
-        assert "Chargement : erreur :" in diagnostic
-    assert window.capture_image._image is previous
-    assert window.open_last_button.isEnabled() and window.open_folder_button.isEnabled()
-    window.open_last_image()
-    target = window._last_capture.get("image") or window._last_capture["original"]
-    assert opened == [str(target)] and target.is_file()
-    assert window.tabs.currentIndex() == 1 and env.workers == [] and not window._preview_failed
-
-
-@pytest.mark.parametrize("preview", [None, QImage()])
-def test_missing_capture_preview_is_reported_without_clearing_image(env, preview):
-    window = env.make()
-    output = {"directory": window.photo_dir, "image": window.photo_dir / "reference.png",
-              "preview": preview, "display_error": "CCM constructeur absente"}
-    window._capture_success(output)
-    assert "rendu/affichage indisponible : CCM constructeur absente" in window.capture_state.text()
-    assert window.capture_image.text() == "Rendu couleur indisponible ; original conservé."
-    assert window.open_last_button.isEnabled()
 
 
 def test_capture_preview_reports_unreadable_file(tmp_path):
@@ -770,55 +363,6 @@ def test_capture_preview_decodes_full_size_saved_render(tmp_path, mode):
 
 
 # ------------------------------------------------------------------ fault
-
-def test_release_fault_blocks_camera_but_keeps_processing(env, qapp, monkeypatch):
-    saved = env.store.create(Bank.draft("Planche", "color_4k", 300, ARDUCAM))
-    window = env.make()
-    window.refresh_devices()
-    choose(window, ARDUCAM)
-    camera.GATE.claim("preview")
-    camera.GATE.release("Libération refusée par le pilote.")
-    env.workers[0].stop()
-    env.workers[0].end()
-    assert window.fault_banner.isVisibleTo(window) and "Redémarrez" in window.fault_banner.text()
-    for widget in (window.camera_combo, window.refresh_cameras_button, window.photo_button):
-        assert not widget.isEnabled()
-    window.refresh_devices()
-    window._camera_chosen(window.camera_combo.findData(ARDUCAM))
-    assert len(env.workers) == 1                     # never reopened
-    window.reload_banks()
-    window._capture_bank_id = saved.id
-    window.tabs.setCurrentIndex(1)
-    assert not window.photo_button.isEnabled()
-    window.take_photo()
-    assert window._task is None
-    window.tabs.setCurrentIndex(2)
-    assert window.tabs.currentIndex() == 2 and window.open_source_button.isEnabled()
-
-
-def test_capture_release_error_archives_pixels_and_reports(tmp_path, monkeypatch, qapp):
-    bank = Bank.draft("Planche", "color_720p", 300, ARDUCAM)
-    pixels = np.full((720, 1280, 3), 40, np.uint8)
-
-    def failing_release(frozen, capture_id, *, device=None):
-        camera.GATE.claim("capture")
-        camera.GATE.release("release refused")
-        return camera.Acquisition(pixels, "color_720p", 300, True, 300, pixels.shape, "uint8",
-                                  {"attempts": 6}, {}, ARDUCAM, capture_id, False,
-                                  release_error="release refused")
-
-    monkeypatch.setattr(camera, "acquire", failing_release)
-    task = ui.CaptureTask(bank, tmp_path)
-    outputs, failures = [], []
-    task.signals.success.connect(outputs.append)
-    task.signals.failure.connect(failures.append)
-    task.run()
-    assert failures == [] and outputs[0]["release_error"] == "release refused"
-    manifest = json.loads(outputs[0]["manifest"].read_text(encoding="utf-8"))
-    assert manifest["status"] == "complete_with_camera_release_error"
-    original = outputs[0]["directory"] / manifest["original"]["path"]
-    assert np.array_equal(np.load(original) if original.suffix == ".npy" else cv2.imread(str(original)), pixels)
-    assert camera.GATE.fault
 
 
 # -------------------------------------------------------- preview worker
@@ -967,8 +511,339 @@ def test_preview_release_error_faults_gate(monkeypatch, preview_devices):
     assert "Redémarrez" in statuses[-1]
 
 
-def test_processing_navigation_does_not_open_camera(env, qapp, monkeypatch):
-    monkeypatch.setattr(ui, "open_device", lambda *_: pytest.fail("Traitement must not open the camera"))
+def accepted_focus(window, value=412):
+    window.refresh_devices()
+    choose(window, ARDUCAM)
+    window._commit_focus(value)
+    window._focus_result(window.preview_token, window._focus_seq, value,
+                         {"accepted": True, "readback": value})
+
+
+def select_bank(window, bank):
+    for row in range(window.bank_list.count()):
+        if window.bank_list.item(row).data(Qt.ItemDataRole.UserRole) == bank.id:
+            window.bank_list.setCurrentRow(row)
+            return
+    pytest.fail("bank not listed")
+
+
+def check_bank(window, bank):
+    for row in range(window.capture_selector.count()):
+        item = window.capture_selector.item(row)
+        if item.data(Qt.ItemDataRole.UserRole) == bank.id:
+            item.setCheckState(Qt.CheckState.Checked)
+            return
+    pytest.fail("capture bank not listed")
+
+
+@pytest.mark.parametrize("size", [(1280, 800), (1920, 1080)])
+def test_integrated_tabs_layout_and_touch_targets(env, qapp, size):
+    bank = env.store.create(Bank.draft("Carte électronique", "color_12mp", 444, ARDUCAM))
+    window = env.make()
+    window.work_bank = window.saved_bank = bank
+    window.refresh_work_controls()
+    window._focus_report = {"state": "accepted", "value": 444,
+                            "report": {"accepted": True, "readback": 444}}
+    window._focus_sync()
+    window.resize(*size)
+    window.show()
+    qapp.processEvents()
+    assert [window.tabs.tabText(i) for i in range(3)] == ["Preview", "Banques", "Capture"]
+    assert not hasattr(window, "mode_combo")
+    assert not hasattr(window, "open_source")
+    assert "720p" in window.preview_disclaimer.text()
+    assert not window.logo.pixmap().isNull() and not window.powered_by.pixmap().isNull()
+    assert not window.photo_button.icon().isNull()
+    for tab in range(3):
+        window.tabs.setCurrentIndex(tab)
+        qapp.processEvents()
+        for button in window.tabs.currentWidget().findChildren(QPushButton):
+            if button.isVisible():
+                assert button.width() >= button.sizeHint().width(), button.text()
+                assert button.width() >= 48 and button.height() >= 48
+                assert button.visibleRegion().boundingRect().size() == button.size(), button.text()
+                assert 15 <= button.font().pixelSize() <= 18
+        for label in window.tabs.currentWidget().findChildren(QLabel):
+            if label.isVisible() and label.wordWrap() and label.text():
+                assert label.height() >= label.heightForWidth(label.width()), label.text()
+    window.tabs.setCurrentIndex(0)
+    assert window.preview_image.width() > window.preview_panel.width()
+
+
+def test_create_from_current_focus_requires_explicit_form_validation(env, monkeypatch):
+    window = env.make()
+    accepted_focus(window)
+    snapshots = []
+
+    def form(dialog):
+        snapshots.append((dialog.name.text(), dialog.mode.currentData()))
+        dialog.name.setText("Boîtier µC")
+        dialog.mode.setCurrentIndex(dialog.mode.findData("raw_108mp"))
+        return ui.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.BankDialog, "exec", lambda self: ui.QDialog.DialogCode.Rejected)
+    window.create_draft()
+    assert env.store.list() == []
+    monkeypatch.setattr(ui.BankDialog, "exec", form)
+    window.create_draft()
+    bank = env.store.list()[0]
+    assert (bank.name, bank.focus, bank.mode, bank.camera) == ("Boîtier µC", 412, "raw_108mp", ARDUCAM)
+    assert window.work_bank.mode == "color_720p"
+    assert window._task is None and not window._busy_capture
+    assert snapshots
+
+
+@pytest.mark.parametrize("state", ["sent", "deferred", "refused", "error", "dropped"])
+def test_pending_failed_or_stale_focus_cannot_be_saved(env, monkeypatch, state):
+    window = env.make()
+    accepted_focus(window)
+    window._focus_report["state"] = state
+    messages = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: messages.append(args[-1]))
+    monkeypatch.setattr(ui.BankDialog, "exec", lambda self: pytest.fail("form must not open"))
+    window.create_draft()
+    assert env.store.list() == [] and messages
+
+
+def test_missing_focus_readback_requires_acknowledgement(env, monkeypatch):
+    window = env.make()
+    accepted_focus(window)
+    window._focus_report["report"]["readback"] = None
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Cancel)
+    assert not window._focus_can_save()
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    assert window._focus_can_save()
+    window._focus_report["seq"] -= 1
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: None)
+    assert not window._focus_can_save()
+
+
+def test_bank_creation_does_not_save_focus_changed_while_form_is_open(env, monkeypatch):
+    window = env.make()
+    accepted_focus(window)
+
+    def form(dialog):
+        accepted_focus(window, 900)
+        return ui.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.BankDialog, "exec", form)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: None)
+    window.create_draft()
+    assert env.store.list() == []
+
+
+def test_bank_checkbox_whole_row_toggles_exactly_once(env, qapp):
+    bank = env.store.create(Bank.draft("Carte", "color_720p", 123, ARDUCAM))
     window = env.make()
     window.tabs.setCurrentIndex(2)
-    assert window.tabs.currentIndex() == 2 and env.workers == []
+    window.show()
+    qapp.processEvents()
+    item = window.capture_selector.item(0)
+    rect = window.capture_selector.visualItemRect(item)
+    for point in (rect.center(), QPoint(rect.left() + 10, rect.center().y())):
+        QTest.mouseClick(window.capture_selector.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        assert window._capture_bank_ids == {bank.id}
+        QTest.mouseClick(window.capture_selector.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        assert window._capture_bank_ids == set()
+
+
+def test_bank_edit_duplicate_and_delete_update_capture_selection(env, monkeypatch, tmp_path):
+    bank = env.store.create(Bank.draft("Carte", "color_12mp", 456, ARDUCAM))
+    window = env.make()
+    select_bank(window, bank)
+
+    def form(dialog):
+        dialog.name.setText("Carte renommée")
+        dialog.mode.setCurrentIndex(dialog.mode.findData("color_4k"))
+        return ui.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.BankDialog, "exec", form)
+    window.edit_bank()
+    updated = env.store.get(bank.id)
+    assert (updated.name, updated.mode, updated.revision, updated.focus) == ("Carte renommée", "color_4k", 2, 456)
+
+    def duplicate_form(dialog):
+        dialog.name.setText("Carte RAW")
+        dialog.mode.setCurrentIndex(dialog.mode.findData("raw_108mp"))
+        return ui.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.BankDialog, "exec", duplicate_form)
+    window.duplicate_bank()
+    duplicate = next(b for b in env.store.list() if b.id != bank.id)
+    assert (duplicate.mode, duplicate.focus, duplicate.revision, duplicate.camera) == ("raw_108mp", 456, 1, ARDUCAM)
+    check_bank(window, updated)
+    check_bank(window, duplicate)
+    assert "2 banques sélectionnées = 2 photos" == window.capture_summary.text()
+    old_photo = tmp_path / "photos" / "old.png"
+    old_photo.parent.mkdir(exist_ok=True)
+    old_photo.write_bytes(b"untouched")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Cancel)
+    window.delete_bank()
+    assert env.store.get(bank.id) == updated
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    window.delete_bank()
+    assert window._capture_bank_ids == {duplicate.id}
+    assert old_photo.read_bytes() == b"untouched"
+
+
+def test_edit_focus_preserves_photo_mode_and_requires_explicit_save(env):
+    bank = env.store.create(Bank.draft("Carte RAW", "raw_108mp", 456, ARDUCAM))
+    window = env.make()
+    window.tabs.setCurrentIndex(1)
+    select_bank(window, bank)
+    window.edit_bank_focus()
+    assert window.tabs.currentIndex() == 0
+    assert window.saved_bank == bank and "Carte RAW" in window.work_title.text()
+    window._commit_focus(457)
+    assert env.store.get(bank.id) == bank
+    window._focus_result(window.preview_token, window._focus_seq, 457,
+                         {"accepted": True, "readback": 457})
+    assert window.save_work_bank()
+    saved = env.store.get(bank.id)
+    assert (saved.mode, saved.focus, saved.revision) == ("raw_108mp", 457, 2)
+
+
+@pytest.mark.parametrize("choice", ["Rester", "Abandonner", "Sauvegarder"])
+def test_dirty_focus_exit_has_three_explicit_choices(env, monkeypatch, choice):
+    bank = env.store.create(Bank.draft("Carte", "color_12mp", 456, ARDUCAM))
+    window = env.make()
+    window._work_selected(window.work_selector.findData(bank.id))
+    window._commit_focus(457)
+    window._focus_result(window.preview_token, window._focus_seq, 457,
+                         {"accepted": True, "readback": 457})
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton",
+                        lambda self: next(b for b in self.buttons() if b.text() == choice))
+    window.tabs.setCurrentIndex(1)
+    assert window.tabs.currentIndex() == (0 if choice == "Rester" else 1)
+    assert env.store.get(bank.id).focus == (457 if choice == "Sauvegarder" else 456)
+    assert window.work_bank.focus == (456 if choice == "Abandonner" else 457)
+
+
+def test_focus_repeat_and_bounds(env, qapp):
+    window = env.make()
+    window.show()
+    accepted_focus(window, 100)
+    QTest.mousePress(window.focus_plus, Qt.MouseButton.LeftButton)
+    QTest.qWait(720)
+    QTest.mouseRelease(window.focus_plus, Qt.MouseButton.LeftButton)
+    assert 102 <= window.work_bank.focus <= 106
+    window._commit_focus(1023)
+    assert not window.focus_plus.isEnabled()
+    window.adjust_focus(1)
+    assert window.work_bank.focus == 1023
+    window._commit_focus(0)
+    assert not window.focus_minus.isEnabled()
+
+
+@pytest.mark.parametrize("object_id", ["", "000042", "µC-零件"])
+def test_sequence_freezes_object_and_banks_keeps_results_in_capture(env, qapp, monkeypatch, object_id):
+    from arducam_photo_v2 import capture as sequence_module
+    first = env.store.create(Bank.draft("A Carte", "color_720p", 123, ARDUCAM))
+    second = env.store.create(Bank.draft("B Boîtier", "color_720p", 456, ARDUCAM))
+    window = env.make()
+    window.tabs.setCurrentIndex(2)
+    assert not window.photo_button.isEnabled()
+    check_bank(window, second)
+    check_bank(window, first)
+    assert window._ordered_capture_banks() == (first, second)
+    window.object_id.setText(object_id)
+    window.object_description.setText("Composants électroniques 漢字")
+    tasks = []
+    monkeypatch.setattr(window, "_start_task", tasks.append)
+    window.take_photo()
+    window.take_photo()
+    assert len(tasks) == 1
+    assert not window.capture_selector.isEnabled() and not window.object_id.isEnabled()
+    assert not window.choose_folder_button.isEnabled() and not window.tabs.isTabEnabled(0)
+    task = tasks[0]
+    window.object_id.setText("changed programmatically")
+    env.store.save(replace(first, focus=999, name="Changed"), first.revision)
+    env.store.delete(second.id)
+    calls = []
+
+    def fake_acquire(bank, identifier):
+        calls.append(bank)
+        pixels = np.full((720, 1280, 3), (20, 80, 160), np.uint8)
+        return camera.Acquisition(pixels, bank.mode, bank.focus, True, bank.focus,
+                                  pixels.shape, "uint8", {"attempts": 6}, {}, bank.camera,
+                                  identifier, True)
+
+    monkeypatch.setattr(sequence_module, "acquire", fake_acquire)
+    progress = []
+    task.signals.progress.connect(progress.append)
+    task.run()
+    assert calls == [first, second]
+    assert progress == ["Photo 1 sur 2 — Banque A Carte", "Photo 2 sur 2 — Banque B Boîtier"]
+    assert not window._busy_capture and window.tabs.currentIndex() == 2 and env.workers == []
+    assert window.result_list.count() == 2 and window.capture_image.has_image()
+    assert window.capture_state.text().startswith("2 réussie(s)")
+    assert window.object_description.text() == "Composants électroniques 漢字"
+    outputs = window._capture_results
+    assert len({output["capture_id"] for output in outputs}) == 2
+    assert all("preview" not in output and "thumbnail" not in output for output in outputs)
+    for output, bank in zip(outputs, (first, second)):
+        metadata = json.loads(output["manifest"].read_text())
+        assert metadata["bank"] == bank.snapshot()
+        assert metadata["object"] == {"id": object_id or None, "description": "Composants électroniques 漢字"}
+        assert metadata["sequence"] == {"id": task.sequence.id, "position": output["position"], "count": 2}
+        assert output["image"].stem == output["manifest"].stem == output["capture_id"]
+    window.select_result(0)
+    assert isinstance(tasks[-1], ui.PhotoTask)
+    tasks[-1].run()
+    assert window.capture_image.has_image()
+    window.clear_object_information()
+    assert window.object_id.text() == window.object_description.text() == ""
+
+
+def test_saved_photo_display_failure_and_partial_results_are_explicit(env, monkeypatch, tmp_path):
+    window = env.make()
+    window.tabs.setCurrentIndex(2)
+    bank = Bank.draft("Carte", "color_720p", 12, ARDUCAM)
+    window._capture_success({"bank": bank, "position": 1, "status": "complete",
+                             "image": tmp_path / "photo.png", "display_error": "decode error"})
+    assert window.capture_image.text() == "Photo enregistrée, affichage indisponible"
+    window._capture_success({"bank": bank, "position": 2, "status": "failed", "error": "USB error"})
+    window._capture_success({"bank": bank, "position": 3, "status": "not_executed"})
+    window._capture_finished()
+    assert window.result_list.count() == 3
+    assert window.capture_state.text() == "1 réussie(s) · 1 en échec · 1 non exécutée(s)."
+    assert env.workers == [] and window.tabs.currentIndex() == 2
+
+
+def test_capture_task_decodes_off_gui_thread(env, qapp, monkeypatch, tmp_path):
+    from arducam_photo_v2 import capture as sequence_module
+    bank = env.store.create(Bank.draft("Carte", "color_720p", 123, ARDUCAM))
+    window = env.make()
+    window.tabs.setCurrentIndex(2)
+    check_bank(window, bank)
+
+    def fake_acquire(bank, identifier):
+        pixels = np.zeros((720, 1280, 3), np.uint8)
+        return camera.Acquisition(pixels, bank.mode, bank.focus, True, bank.focus,
+                                  pixels.shape, "uint8", {}, {}, ARDUCAM, identifier, True)
+
+    monkeypatch.setattr(sequence_module, "acquire", fake_acquire)
+    decode = ui.capture_preview
+    threads = []
+
+    def checked_decode(path):
+        threads.append(QThread.currentThread() == qapp.thread())
+        return decode(path)
+
+    monkeypatch.setattr(ui, "capture_preview", checked_decode)
+    installed = []
+    install = window.capture_image.set_qimage
+
+    def checked_install(image):
+        installed.append(QThread.currentThread() == qapp.thread())
+        install(image)
+
+    monkeypatch.setattr(window.capture_image, "set_qimage", checked_install)
+    window.take_photo()
+    deadline = time.monotonic() + 10
+    while (window._busy_capture or window._active_tasks) and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(.005)
+    assert not window._busy_capture and not window._active_tasks
+    assert threads == [False] and installed == [True]

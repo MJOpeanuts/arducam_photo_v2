@@ -1,362 +1,236 @@
-# Arducam Photo v2
+# Arducam Photo V2
 
-Application locale Windows 11 x64 pour la caméra Arducam B0494C. Elle comporte
-trois onglets intégrés — **Preview**, **Capture**, **Traitement** — et configure
-le Mode d’acquisition et le Focus manuel. Elle n’ouvre ni navigateur ni serveur.
+Application locale Windows 11 x64 / PySide6 pour photographier exclusivement
+des **cartes électroniques, composants électroniques et conditionnements de
+composants** avec l’Arducam B0494C. Elle conserve l’acquisition existante et
+comporte trois onglets intégrés : **Preview**, **Banques**, **Capture**.
+Pas de navigateur, de serveur ni d’onglet Traitement.
 
-## État de livraison
+## Mise à jour et lancement sous Windows
 
-Le dépôt contient une application Python/PySide6 exécutable, quatre modes de
-capture strictement validés, les banques locales, l’archivage des originaux et les
-traitements hors caméra. Les tests automatiques utilisent une caméra simulée ;
-aucun essai sur Arducam ou pilote Windows n’a été effectué dans cet environnement.
-
-L’ancien dépôt `MJOpeanuts/arducam_photo` a été consulté en lecture seule. La
-copie locale `../arducam_photo` était absente. La référence confirme pour le RAW
-le transport UVC 6000 × 9000, `CAP_PROP_CONVERT_RGB=0`, un buffer `uint8` exact
-de 108 000 000 octets, puis sa reconstruction Bayer en 12000 × 9000. La v2
-reprend ces invariants sans importer l’ancien code, ses banques ou préférences.
-
-Captures d’interface après correction (Linux, Qt offscreen, image générée,
-aucune caméra réelle) dans `docs/screenshots/` :
-[Preview](docs/screenshots/preview.png),
-[Capture](docs/screenshots/capture.png),
-[Traitement](docs/screenshots/traitement.png). Les configurations réellement
-contrôlées et la commande de reproduction sont précisées ci-dessous.
-
-![Preview](docs/screenshots/preview.png)
-
-### Ressources visuelles et licences
-
-Les logos fournis dans `assets/` (`logo_ref.png` pour l’en-tête,
-`poweredby.png` pour le pied de page, `icon_ref.png` pour l’icône de fenêtre)
-sont copiés à l’identique dans le package `src/arducam_photo_v2/resources/`
-et lus via `importlib.resources` : aucun chemin absolu, aucun dossier externe,
-aucun accès réseau. `app.ico` (16 à 256 px, carré, sans étirement) est généré
-depuis `assets/icon_ref.png` par `python packaging/make_icon.py`.
-
-L’icône `squirrel` provient de Lucide (commit `87a89b30`), embarquée telle quelle
-dans `lucide-squirrel.svg` ; sa licence ISC est fournie dans
-`resources/LICENSE-lucide.txt`. Elle sert de pictogramme secondaire (états sans
-image) et accompagne le libellé « Capturer » du bouton de prise de photo,
-jamais à la place du logo. Son rendu est décliné pour les états normal et
-désactivé et les écrans haute résolution. La flèche des listes est l’icône Lucide
-`chevron-down` (même licence), dont seule la couleur du trait est fixée.
-
-## Installation et lancement depuis les sources
-
-Prérequis : Windows 11 x64, Python 3.12 x64, accès au pilote Arducam/UVC pour
-les fonctions caméra. Dépendances prises en charge : NumPy `>=1.26,<3`,
-OpenCV `opencv-python >=4.10,<5` sous Windows (DirectShow et MSMF) ou
-`opencv-python-headless >=4.10,<5` hors Windows, PySide6 Essentials `>=6.7,<7`,
-cv2-enumerate-cameras `>=1.4,<2` (noms et chemins des périphériques). Dans PowerShell,
-depuis la racine du dépôt (aucun chemin de dépôt installé n’est supposé) :
+Prérequis : Python **3.12 x64**, pilote Arducam/UVC, caméra USB connectée.
+Dans PowerShell, depuis la racine du dépôt :
 
 ```powershell
+git pull --ff-only
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[test]"
 .\.venv\Scripts\python.exe -m arducam_photo_v2.app
 ```
 
-Pour migrer un environnement Windows existant, le recréer avant l’installation :
-les variantes `opencv-python` et `opencv-python-headless` ne doivent pas être
-installées simultanément. L’application vérifie la disponibilité réelle de
-MSMF au moment d’une capture RAW et s’arrête explicitement s’il manque ; elle
-ne bascule pas sur DirectShow.
+La création du venv est également utilisable à la première installation.
+Les dépendances et la commande de lancement restent celles du projet existant.
+Ne pas installer simultanément `opencv-python` et `opencv-python-headless` :
+la dépendance Windows est `opencv-python`, avec DirectShow et Media Foundation.
 
-L’application démarre sur Preview. Elle ne choisit jamais de caméra
-d’elle-même : la liste « Caméra » présente les périphériques (nom, index
-OpenCV actuel, chemin matériel en info-bulle) ; « Actualiser » relance
-l’énumération. L’aperçu permet de vérifier visuellement le choix. La caméra
-choisie est enregistrée dans la banque (backend, nom, chemin matériel). L’index
-OpenCV n’est pas une identité : au chargement d’une banque, la caméra est
-retrouvée par son chemin matériel, sinon par son nom ; si elle est absente ou
-ambiguë, une sélection est demandée. La session précédente est toujours
-libérée avant l’ouverture d’un autre périphérique ; jamais deux accès simultanés.
-Sous Windows, Preview et les captures couleur utilisent DirectShow (`DSHOW`).
-Le RAW 108 MP utilise explicitement Media Foundation (`MSMF`), comme dans la
-démo constructeur ; sous Linux il utilise V4L2. Chaque backend est vérifié avant
-énumération/ouverture, sans repli. Pour le RAW, le périphérique choisi dans
-Preview est retrouvé par chemin matériel ou nom sur MSMF ; un périphérique
-absent ou ambigu arrête la capture.
-Une banque enregistrée avec MSMF ne réimpose pas ce backend : sélectionnez à
-nouveau sa caméra dans Preview puis sauvegardez-la. Aucun index n’est transposé
-d’un backend à l’autre. Capturer exige le même contexte caméra que Preview.
-
-Le mode d’aperçu est un transport couleur
-720p indépendant du Mode d’acquisition sauvegardé dans la banque. L’aperçu se libère en quittant
-Preview. Capture n’ouvre pas de flux au repos ; Traitement ne possède aucun
-chemin d’accès à la caméra.
-
-## Interface et banques
-
-La police de l’interface est Segoe UI (substitution par Qt si absente).
-Les textes courants sont à 15 px logiques, les boutons à 16 px, les onglets
-et « Capturer » à 17 px, les titres à 20 px et la valeur du focus à 28 px.
-La taille du texte est indépendante des cibles tactiles : au moins 48 × 48 px
-pour les boutons et les lignes des listes, 56 px de haut pour le curseur.
-La sélection des onglets utilise aussi un soulignement ; les boutons pressés
-et désactivés ont des bordures distinctes. Pendant la capture, le déclencheur
-est désactivé et indique « Capture en cours… », avec une barre de progression.
-Les panneaux de commandes et Diagnostic peuvent défiler au toucher lorsque
-l’espace disponible diminue, sans débordement horizontal.
-La boîte de dialogue intégrée
-permet de saisir un nom ou un Focus manuel sans clavier physique. Qt 6 suit la mise à
-l’échelle Windows ; la géométrie est exprimée en pixels logiques. Les facteurs
-Windows 100 %, 125 % et 150 % restent à vérifier sur un écran tactile réel.
-
-Le Focus manuel est un entier de 0 à 1023, sans unité physique ni calibration.
-La valeur reste « Focus manuel non défini » tant que l’utilisateur n’en choisit pas une.
-Le curseur (zone tactile réelle de 56 px de haut) envoie au relâchement, la
-saisie numérique à la validation ; − et + sont actifs dès la première consigne.
-Seule la dernière consigne en attente est transmise. Charger une banque applique
-son Focus manuel au Preview actif ; sans Preview actif, la consigne est appliquée à
-l’ouverture de la session suivante. Les synchronisations d’affichage n’envoient
-aucune commande. « Renvoyer » retransmet la même valeur après un refus. Les
-résultats d’une ancienne session ou d’une consigne dépassée sont ignorés. Le
-rapport de commande, son acceptation/refus, la relecture et l’effet optique sont
-distincts ; une commande acceptée ne signifie pas une mise au point réussie.
-Les explications et le journal sont dans « Diagnostic », accessible depuis
-Preview et Capture. « Relancer le Preview » précède les paragraphes techniques.
-
-La banque sauvegardée est séparée de la copie de travail ; elle contient son
-identifiant et son nom, la caméra, le Mode d’acquisition, le Focus manuel et les
-informations techniques de stockage. Après sauvegarde, la banque reste
-sélectionnée dans Capture, qui affiche son nom, sa caméra, son Mode d’acquisition
-et son Focus manuel ;
-les sélections survivent aux rechargements et changements d’onglet. Capture
-relit une banque sauvegardée puis en fige une copie. Modifier n’enregistre rien,
-« Sauvegarder la banque » ne prend aucune photo. Le remplacement demande
-confirmation. Les banques de l’ancien projet ne sont pas importées.
-
-## Modes d’acquisition
-
-| Mode | Données validées |
-| --- | --- |
-| `color_720p` | BGR uint8, 1280 × 720 |
-| `color_4k` | BGR uint8, 3840 × 2160 |
-| `color_12mp` | BGR uint8, 4000 × 3000 |
-| `raw_108mp` | Bayer uint8 reconstruit, 12000 × 9000 ; transport 6000 × 9000, conversion couleur désactivée |
-
-Les captures couleur utilisent l’API OpenCV DirectShow sous Windows ; le RAW
-utilise MSMF explicitement (V4L2 sous Linux). Aucun changement de backend n’est
-tenté en cas d’indisponibilité. Pour le RAW, largeur 6000, hauteur 9000 et
-`CAP_PROP_CONVERT_RGB=0` sont configurés ; les 108 000 000 octets reçus sont
-reconstruits en 9000 × 12000. Chaque image reçue est validée en type,
-forme et nombre d’octets. Une configuration acceptée par le pilote ne suffit
-pas. Une image non conforme ou un mode refusé produit une erreur visible.
-Largeur et hauteur sont relues après l’ensemble des commandes du mode,
-avant la stabilisation. Ces valeurs rapportées par le pilote peuvent encore
-différer des dimensions reçues : elles sont diagnostiques, et ne remplacent
-jamais la validation des pixels effectivement acquis.
-
-Au déclenchement : la banque est figée, sa caméra est retrouvée, ouverte et
-configurée, le Focus manuel est appliqué, puis une stabilisation bornée lit au plus
-30 images. Lectures échouées, buffers non conformes (images transitoires après
-changement de résolution) et images valides sont comptés séparément ; il faut
-six images valides consécutives, la dernière est conservée. Si la limite est
-atteinte, la capture échoue avec un message clair, sans repli de résolution ni
-de backend. Les compteurs sont écrits dans `acquisition.json`
-(`camera.stabilization`). La caméra est libérée avant le rendu.
-
-Après un échec d’ouverture ou de lecture terminal, la caméra est libérée et
-l’erreur reste affichée. Le Preview tolère au plus 30 lectures consécutives
-échouées ou non conformes ; une exception de lecture termine immédiatement la
-session. Aucune réouverture automatique n’est tentée, même après changement
-d’onglet, de banque ou actualisation : utilisez « Relancer le Preview ».
-Le diagnostic indique le backend choisi, sa disponibilité,
-la caméra résolue (index courant et chemin) et les dimensions réellement reçues.
-Les diagnostics de capture et ses erreurs y sont également conservés.
-
-Si la libération matérielle échoue, les pixels acquis sont archivés, l’erreur
-est affichée et la gestion caméra passe en défaut : Preview et Capture ne
-rouvrent plus la caméra (aucune nouvelle tentative) et l’application demande
-un redémarrage. Traitement reste utilisable.
-
-Les modes couleur archivent `reference.png`. Le RAW est archivé sans retouche
-dans `original.raw` avant dématriçage ; `acquisition.json` partage le même
-identifiant de capture et conserve le contexte, les dimensions et retours
-disponibles, les durées, traitements et erreurs. Le rendu RAW de référence
-applique le niveau noir 16, le dématriçage constructeur BayerGR2RGB puis la
-CCM interpolée à 4000 K depuis `arducam_108mp.json` à la racine du dépôt. Le
-manifeste enregistre la recette, la température et l’empreinte SHA-256 du fichier ;
-la sortie est BGR, comme attendu par l’encodage PNG et l’interface OpenCV/Qt.
-Ce fichier constructeur fourni localement est ignoré par Git et n’est pas inclus
-dans les paquets. S’il manque ou est invalide, le RAW et le manifeste sont
-conservés, mais le rendu échoue avec une erreur explicite — aucune CCM de
-remplacement n’est utilisée.
-Les noms sont uniques et les fichiers ne sont jamais remplacés.
-
-Après une capture réussie, le rendu apparaît automatiquement dans Capture,
-sans changement d’onglet ni réouverture de la caméra. Le dossier de sortie
-est résolu en chemin absolu au démarrage du worker ; les chemins
-`original.path` et `render.path` du manifeste restent relatifs à leur dossier
-de capture, jamais au répertoire de travail. La lecture des octets via Python
-puis le décodage OpenCV prennent en charge les chemins Unicode.
-Le worker transmet au thread graphique une image Qt autonome,
-réduite à 1600 px maximum pour l’affichage uniquement. Les proportions sont
-conservées, sans recadrage, et l’image s’adapte au redimensionnement.
-La dernière photo affichée reste visible jusqu’au prochain résultat affichable.
-Si le rendu ou son affichage échoue après sauvegarde, le message
-« Photo enregistrée, affichage indisponible » apparaît avec le détail dans
-Diagnostic ; les boutons d’ouverture de la photo (ou de l’original RAW si le
-rendu manque) et du dossier restent disponibles. Aucune nouvelle prise
-ni erreur d’acquisition n’est déclenchée pour cet échec d’affichage.
-Diagnostic distingue sauvegarde, chargement et installation dans le widget,
-avec leurs erreurs ; ces détails ne surchargent pas le statut principal.
-
-Cause démontrée dans l’ancien code : un échec de `cv2.imread()` produisait
-un résultat sauvegardé sans image d’affichage ni diagnostic. Le déclencheur
-exact de l’incident Windows en couleur 12 MP (4000 × 3000) reste à confirmer
-sur le PC : le traitement des chemins Unicode est une hypothèse, pas une
-cause matérielle démontrée. La limite du lecteur PNG Qt concerne les grands
-rendus, notamment le 108 MP ; elle n’explique pas l’incident 12 MP.
-
-Ce n’est pas un décodage à faible consommation mémoire : OpenCV décode
-l’image entière avant réduction (324 Mo de pixels BGR pour 108 MP, hors
-buffers temporaires). Les pixels acquis sont libérés après archivage, avant
-ce chargement ; les octets compressés et le tableau décodé ne sont pas
-conservés après création de l’image d’affichage. Une capture en cours bloque
-les déclenchements suivants jusqu’à la fin du worker, donc leurs chargements
-ne s’accumulent pas. La copie Qt est nécessaire pour détacher le petit buffer
-d’affichage de NumPy.
-
-Mesure Linux/Python 3.12 en processus séparés, cinq chargements consécutifs
-d’un PNG synthétique uniforme, en conservant le dernier résultat :
-12 MP, RSS initiale 79,9 Mio, pic 168,2 Mio, RSS après chargements
-88,7 / 94,0 / 99,4 / 99,5 / 99,5 Mio ; 108 MP, RSS initiale 80,1 Mio,
-pic 717,8 Mio, puis 89,0 / 94,3 / 99,7 / 99,8 / 99,8 Mio.
-Après libération du résultat : 83,2 et 83,5 Mio respectivement.
-Ces mesures concernent uniquement le chargement, pas l’acquisition ni
-le dématriçage ; la compression du fichier, l’allocateur et Windows peuvent
-changer les pics. Il reste à mesurer une séquence réelle sur le PC.
-
-## Traitement hors caméra
-
-Ouvrir un manifeste d’acquisition JSON ou une image PNG/JPEG enregistrée. Les
-traitements créent un nouveau fichier (PNG/JPEG) et refusent de remplacer la
-source. Les chemins du manifeste sont résolus depuis le dossier du manifeste ;
-les images sont décodées depuis leurs octets pour gérer aussi les chemins
-Windows avec espaces et accents. Les opérations RAW sont dématriçage minimal,
-niveau noir + dématriçage et rendu de référence corrigé. Le panneau source présente un rendu minimal
-clairement nommé : le Bayer original n’est pas une photo couleur. Pour les
-images couleur : niveaux de gris, contraste logiciel, réduction proportionnelle.
-Le contraste de ce panneau ne produit aucune commande caméra.
-
-## Stockage
-
-- Banques et données d’application : `%LOCALAPPDATA%\ArducamPhotoV2\banks.sqlite3`.
-  Ce stockage de réglages a changé de format : une base antérieure ou illisible
-  est réinitialisée (réglages vides) et un avis est affiché en pied de page.
-  Aucun import des anciens réglages ; photos, RAW et manifestes ne sont jamais
-  touchés.
-- Photos, manifestes et rendus : `%USERPROFILE%\Pictures\ArducamPhotoV2` par
-  défaut ; le dossier peut être choisi dans Capture.
-- En l’absence de variables Windows, les données applicatives vont sous
-  `~/AppData/Local/ArducamPhotoV2` et les photos sous `~/Pictures/ArducamPhotoV2`.
-
-Ces emplacements sont propres à v2 et séparés du programme et de l’ancien
-projet. La fermeture du Preview libère son flux ; « Relancer le Preview » ferme
-puis rouvre le flux et ne réinitialise aucun réglage caméra. Les appels natifs
-OpenCV bloquants ne promettent pas d’annulation instantanée.
-
-## Tests et construction portable
-
-Tests simulés :
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Les tests s’exécutent sous Linux (Python 3.12, `QT_QPA_PLATFORM=offscreen`)
-avec une caméra et un énumérateur factices. Ils couvrent aussi la disponibilité
-des backends, la résolution des index, les échecs terminaux et la relance manuelle.
-Ils ne remplacent pas les essais Windows/Arducam.
-Le transfert worker → interface est testé dans les quatre modes avec des
-acquisitions synthétiques (12 MP aux dimensions réelles, autres modes réduits),
-un archivage et un décodage réels, des chemins relatifs avec espaces/accents
-depuis un autre répertoire de travail et des signaux entre threads.
-Les tests vérifient
-aussi le décodage aux dimensions réelles des quatre rendus, le redimensionnement,
-la conservation du fichier et de la dernière
-image affichée, ainsi que les échecs de rendu/décodage après sauvegarde.
-Ces vérifications sont simulées : aucun essai matériel supplémentaire
-Windows/Arducam n’est attesté par ces tests.
-
-### Contrôle visuel de l’interface
-
-Les trois onglets ont été contrôlés sous Linux/Qt offscreen aux six
-configurations suivantes. Les dimensions de fenêtre sont celles de la zone
-cliente, en **pixels logiques** ; les facteurs Qt simulent la densité d’affichage,
-pas le rendu natif de Windows.
-
-| Fenêtre logique | Capture à 100 % | Capture à 125 % | Capture à 150 % |
-| --- | --- | --- | --- |
-| 1280 × 800 | 1280 × 800 px | 1600 × 1000 px | 1920 × 1200 px |
-| 1920 × 1080 | 1920 × 1080 px | 2400 × 1350 px | 2880 × 1620 px |
-
-Les fichiers suivent les noms `preview`, `capture`, `traitement` : sans suffixe
-pour 1280 × 800 à 100 %, suffixe `-125` / `-150` pour cette même fenêtre,
-`-1920`, `-1920-125`, `-1920-150` pour 1920 × 1080.
-Les contrôles couvrent aussi les claviers de nom et de focus, les dialogues
-Diagnostic, modifications non sauvegardées, erreur et ouverture de fichier
-(version Qt non native), le bouton pressé et la capture en cours, les erreurs
-Preview/Capture/Traitement et le défaut de libération caméra.
-Les captures de ces états à 1280 × 800 et 100 % sont également conservées.
-La hauteur des textes repliés, la lisibilité complète des boutons et leur
-accessibilité sont contrôlées par le script, en plus de la revue des images.
-
-Les espaces logiques réduits correspondant à des fenêtres **physiques**
-1280 × 800 et 1920 × 1080 ont également été contrôlés : respectivement
-1024 × 640 / 853 × 533 à 125 % / 150 %, et 1536 × 864 / 1280 × 720.
-Les panneaux défilent si nécessaire : le résumé reste complet, le déclencheur
-de capture reste visible et les autres actions restent accessibles au toucher.
-Les trois vues du cas physique 1280 × 800 à 150 % sont conservées sous
-`*-physical-1280-150.png`. Pour reproduire ce cas, ajouter `--allow-scroll`
-et utiliser `--width 853 --height 533` avec `QT_SCALE_FACTOR=1.5`.
-
-Reproduction depuis la racine, après installation des dépendances de test :
-
-```bash
-QT_QPA_PLATFORM=offscreen:configfile=tests/qt_offscreen.json \
-QT_SCALE_FACTOR=1.25 .venv/bin/python tests/capture_ui.py \
-  --width 1280 --height 800 --states
-```
-
-L’écran virtuel de 3840 × 2160 évite que l’écran offscreen par défaut de
-800 × 800 ne comprime artificiellement les dialogues. Aucun périphérique
-n’est ouvert et les banques de démonstration sont dans un dossier temporaire.
-Les facteurs Windows réels, les dialogues natifs, le tactile matériel et la
-caméra restent à vérifier sur Windows.
-
-Le build portable doit être exécuté sous Windows 11 x64 avec Python 3.12 x64 :
+Pour construire l’exécutable portable depuis les sources :
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\packaging\build_windows.ps1
+.\dist\ArducamPhotoV2.exe
 ```
 
-Le script installe les dépendances de build et produit
-`dist\ArducamPhotoV2.exe` (PyInstaller, mode fenêtre, fichier unique, icône
-`app.ico`, ressources visuelles et `cv2_enumerate_cameras` embarqués). Ce build
-n’a pas été exécuté sur Windows. Un bundle PyInstaller Linux de contrôle a été
-produit ici ; il ne valide ni l’exécutable Windows ni les pilotes caméra.
+Le fichier de correction **local** `arducam_108mp.json` est recherché à la
+racine du dépôt pour le lancement depuis les sources en mode éditable ; pour
+l’exécutable portable, à côté de `ArducamPhotoV2.exe`. La recherche ne dépend
+pas du répertoire courant. Ce fichier n’est ni suivi par Git ni inclus dans
+le paquet ou l’exécutable : sa présence locale n’accorde aucun droit de
+redistribution. L’obtenir séparément auprès d’une source autorisée.
+Sans correction valide, les modes couleur restent utilisables et le RAW
+correctement acquis reste sauvegardé ; seul son rendu couleur échoue.
 
-### Vérifications matérielles restantes
+## Preview : cadrage et focus
 
-Un essai antérieur sur le PC Windows (Python 3.12.10, OpenCV headless
-4.14.0.94) a validé l’ouverture DirectShow et une lecture couleur de forme
-`(720, 1280, 3)`, mais MSMF y était indisponible. Après recréation de
-l’environnement avec la dépendance Windows déclarée ici, la disponibilité MSMF
-doit encore être vérifiée sur ce PC. Cela ne valide ni le Focus manuel, ni les
-captures dans les quatre modes, ni les modes 4K, 12 MP ou RAW 108 MP.
+Sélectionner explicitement la caméra ; aucune caméra n’est choisie silencieusement.
+Le Preview conserve un flux technique **couleur 1280 × 720**, indépendamment du
+mode photo des banques. Il n’a pas de sélecteur permanent de mode photo.
 
-Les essais simulés ne valident ni le pilote, ni la prise en charge des formats,
-ni la convention physique de Bayer, ni la netteté/couleur. Sur Windows et la
-B0494C, vérifier séparément les quatre modes (USB 3 requis pour RAW), les formes
-des buffers, la commande/relecture du Focus manuel, le rendu avec mire couleur, le
-champ de vue et la netteté en mode photo, les captures successives et la
-libération caméra. Vérifier aussi : noms/chemins listés par DirectShow et
-correspondance avec l’index OpenCV, débranchement/rebranchement et deux
-caméras identiques, nombre réel d’images transitoires après changement de
-résolution, comportement en cas d’échec de libération, facteurs 100/125/150 %,
-le tactile, l’icône de l’exécutable et le lancement portable hors ligne.
+Le focus manuel est une **consigne entière de 0 à 1023**, sans unité physique.
+Le curseur s’applique au relâchement ; « Saisir » ouvre un pavé numérique et
+applique la valeur à sa validation. Les boutons − et + avancent d’un pas,
+avec répétition après 450 ms puis toutes les 100 ms pendant le maintien.
+Le propriétaire caméra ne garde que la commande en attente la plus récente.
+
+L’interface distingue demande, acceptation, relecture éventuelle et erreur.
+**Une commande acceptée ou relue n’est jamais une preuve de netteté.**
+Les rapports détaillés restent dans Diagnostic. Aucun réglage opérateur
+d’exposition, gain, balance des blancs, luminosité, contraste ou saturation.
+
+« Créer une banque avec ce focus » ouvre un formulaire court : nom, focus
+repris, mode photo. Seul « Enregistrer » crée la banque ; aucune photo n’est
+prise et le Preview reste en 720p. Une consigne en attente, périmée ou refusée
+ne peut pas être sauvegardée. Une relecture absente ou différente exige une
+confirmation explicite de la limite de vérification.
+
+## Banques : configurations sauvegardées
+
+Chaque banque possède un identifiant indépendant, un nom, un mode photo,
+un focus, un contexte caméra et une révision.
+
+| Mode | Photo produite |
+|---|---|
+| `color_720p` | Couleur 1280 × 720 |
+| `color_4k` | Couleur 3840 × 2160 |
+| `color_12mp` | Couleur 4000 × 3000 |
+| `raw_108mp` | Bayer reconstruit 12000 × 9000 et rendu couleur automatique |
+
+« Nom et mode » modifie une banque ; « Dupliquer » copie le focus et la
+caméra dans une banque avec **un nouvel identifiant**, puis permet de choisir
+le nom et le mode. On peut ainsi préparer une banque RAW depuis une banque
+12 MP. Cela ne garantit pas une netteté identique entre modes.
+
+« Régler le focus dans Preview » charge la banque, l’identifie à l’écran et
+applique sa consigne dans le Preview technique fixe. La consigne de travail
+reste distincte de la banque sauvegardée. « Sauvegarder le focus » enregistre
+explicitement la modification, **sans changer son mode photo**. Avant de
+quitter avec des modifications, choisir Sauvegarder, Abandonner ou Rester.
+Chaque modification sauvegardée incrémente la révision.
+
+La suppression demande confirmation, actualise les cases de Capture et ne
+touche jamais aux anciennes photos, RAW ou JSON.
+
+## Capture : une photo par banque cochée
+
+Cocher une ou plusieurs banques. L’ordre affiché, trié par nom puis identifiant
+pour départager les noms identiques, est l’ordre stable d’exécution.
+« N banques sélectionnées = N photos ». Sans sélection, Capturer est désactivé.
+
+Les champs facultatifs « ID de l’objet » et « Description de l’objet »
+décrivent l’objet photographié, pas une banque. L’ID est du texte : `000042`,
+les caractères Unicode et les espaces significatifs sont conservés.
+Un champ vide ou seulement composé d’espaces devient `null` dans les JSON.
+Ces champs ne construisent jamais les chemins de fichiers.
+Ils restent visibles après la séquence ; « Effacer les informations objet »
+est la seule action qui les vide.
+
+Au déclenchement sont figés l’ordre, les banques complètes et leurs révisions,
+ainsi que les informations objet. La configuration, la navigation et les
+déclenchements supplémentaires sont bloqués pendant la séquence.
+La progression indique « Photo 2 sur 3 — Banque [nom] ».
+
+Pour chaque banque, l’application résout sa caméra, ouvre le backend prévu,
+configure le mode, applique le focus, attend **6 lectures conformes consécutives**
+(30 tentatives maximum), valide et copie le buffer, puis libère la caméra
+**avant** l’archivage et le rendu. Aucun accès concurrent, aucun flux continu
+au repos dans Capture, aucun retour ou redémarrage automatique du Preview.
+
+Après une erreur de prise avec libération correcte, la banque suivante est
+exécutée sans réessayer la prise échouée. En cas de défaut de libération,
+d’accès occupé ou d’état matériel incertain, les suivantes sont marquées
+« Non exécutée ». Un défaut matériel impose le redémarrage de l’application.
+Les résultats précédents restent disponibles.
+
+Capture conserve les résultats sous forme de vignettes sélectionnables,
+avec banque, mode et statut, ainsi qu’un bilan réussites/échecs/non exécutées.
+La photo sélectionnée s’affiche en grand sans déformation ; « Photo » ouvre
+son fichier, « Ouvrir » son dossier. Un RAW sans rendu reste accessible dans
+son dossier. Si une photo sauvegardée ne peut pas être décodée, le message est
+« Photo enregistrée, affichage indisponible ».
+Décodage et réduction sont effectués hors du thread graphique ; seuls les
+aperçus autonomes réduits et les vignettes sont conservés pour l’affichage,
+pas tous les rendus pleine résolution.
+
+## Originaux et métadonnées
+
+Chaque photo possède son UUID technique unique, distinct de l’ID objet et
+de l’UUID commun de séquence. Le format existant **PNG sans perte** est
+conservé. Dans un dossier par capture :
+
+```text
+<identifiant_capture>/
+    <identifiant_capture>.png
+    <identifiant_capture>.json
+    <identifiant_capture>.raw   # uniquement pour raw_108mp
+```
+
+Le RAW et la photo couleur sont des fichiers distincts partageant le même
+identifiant. Aucun dossier ou fichier de capture existant n’est écrasé.
+Toutes les références du manifeste correspondent aux fichiers effectivement
+produits ; si le rendu RAW échoue, le PNG n’est pas annoncé comme produit.
+
+Le JSON, schéma **2**, contient : capture, séquence et position, date UTC avec
+fuseau, objet facultatif, copie figée de la banque (identifiant, nom, révision,
+mode, focus, caméra), configuration demandée, caméra/backend effectivement
+résolus, acceptation et relecture du focus, forme/type/format/octets reçus,
+stabilisation, libération, erreurs, fichiers et caractéristiques
+(dimensions, taille, format et SHA-256), durées et recette de rendu.
+Une banque renommée, modifiée ou supprimée ne modifie jamais ces archives.
+
+Réglages : `%LOCALAPPDATA%\ArducamPhotoV2\banks.sqlite3`.
+Photos par défaut : `%USERPROFILE%\Pictures\ArducamPhotoV2`, modifiable via
+« Dossier… ». Le schéma SQLite existant est conservé ; aucune migration ou
+remise à zéro n’est nécessaire pour cette évolution. Comme auparavant, une
+base de réglages de développement incompatible ou corrompue est réinitialisée
+avec notification, **uniquement dans le stockage de configuration V2**.
+Les dossiers photos ne sont jamais concernés.
+
+## Invariants RAW 108 MP et backends
+
+Sous Windows : Preview et photos couleur sur **DirectShow (`DSHOW`)** ;
+RAW sur **Media Foundation (`MSMF`)**, explicitement. Sous Linux : V4L2.
+Le périphérique est retrouvé par chemin matériel ou, à défaut, nom unique ;
+l’index seul n’est pas une identité. Chaque banque résout sa propre caméra,
+sans exiger un flux Preview préalable. Backend indisponible, caméra absente
+ou ambiguë : erreur explicite, **aucun repli de backend ou résolution**.
+
+RAW : transport **6000 × 9000**, `CAP_PROP_CONVERT_RGB=0`,
+**108 000 000 octets uint8 exactement**, reconstruction **9000 lignes ×
+12000 colonnes**. Le tableau `(9000, 6000, 3)` de 162 000 000 octets est rejeté :
+ni troncature ni extraction de canal.
+
+Le Bayer est écrit avant tout traitement. Le rendu automatique conserve la
+recette existante : soustraction saturante du niveau noir 16, dématriçage
+BayerGR2RGB, CCM constructeur interpolée à 4000 K, saturation fixe 1.0.
+Les coefficients sont lus depuis `arducam_108mp.json`, jamais recopiés en dur.
+La recette, l’emplacement et l’empreinte SHA-256 du fichier utilisé sont
+consignés. Le rendu reste **12000 × 9000 sans upscale**.
+Une correction absente/invalide ou une erreur de rendu produit le statut
+`render_error_original_preserved`, pas un échec d’acquisition : le RAW reste
+intact et la séquence peut continuer si la caméra est correctement libérée.
+
+## Identité visuelle et contrôles
+
+Les logos locaux `logo_ref.png`, `poweredby.png`, `icon_ref.png`, l’icône
+Windows et les ressources Lucide restent embarqués à l’identique.
+L’icône **squirrel** est conservée sur Capturer ; licence ISC dans
+`resources/LICENSE-lucide.txt`.
+Textes courants à 15 px, boutons autour de 16 px, cibles d’au moins 48 × 48 px
+logiques, curseur tactile de 56 px. Les diagnostics ne repoussent pas les
+commandes essentielles ; leurs détails sont dans un panneau ou dialogue dédié.
+
+Tests automatiques, Linux / Qt offscreen :
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
+```
+
+Sous Windows :
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+.\.venv\Scripts\python.exe -m pytest -q
+Remove-Item Env:\QT_QPA_PLATFORM
+```
+
+Les tests couvrent les banques, le focus et sa confirmation, les séquences
+figées, l’objet vide/avec zéros initiaux/Unicode, l’archivage, les identifiants,
+les erreurs partielles et l’arrêt sûr, les quatre modes, le RAW préservé et
+les images autonomes hors thread graphique. Les petites matrices CCM et les
+buffers caméra de test sont **synthétiques**, pas une calibration ni une
+validation matérielle du constructeur.
+
+Reproduire les contrôles visuels à 1280 × 800 et 1920 × 1080 :
+
+```bash
+QT_QPA_PLATFORM=offscreen:configfile=tests/qt_offscreen.json .venv/bin/python tests/capture_ui.py --width 1280 --height 800 --output /tmp/arducam-ui-1280
+QT_QPA_PLATFORM=offscreen:configfile=tests/qt_offscreen.json .venv/bin/python tests/capture_ui.py --width 1920 --height 1080 --output /tmp/arducam-ui-1920
+```
+
+Le script génère une carte de démonstration et des captures d’interface
+**sans caméra réelle**. Qt 6 utilise des dimensions logiques et suit la mise
+à l’échelle de l’écran ; un contrôle offscreen ne valide pas Windows.
+Restent à vérifier sur matériel : les quatre modes et leurs dimensions,
+l’identité USB entre DSHOW/MSMF, l’effet optique du focus (pas 1, plage 0–1023),
+la stabilisation et les débranchements, le RAW exact et son rendu avec le vrai
+fichier CCM autorisé, la consommation mémoire à 108 MP, le tactile et la mise
+à l’échelle Windows à 100 %, 125 % et 150 %.

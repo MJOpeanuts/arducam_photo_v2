@@ -79,7 +79,7 @@ class BankStore:
 
     def list(self) -> list[Bank]:
         with self._connect() as db:
-            return [self._decode(row) for row in db.execute("SELECT * FROM banks ORDER BY name COLLATE NOCASE")]
+            return [self._decode(row) for row in db.execute("SELECT * FROM banks ORDER BY name COLLATE NOCASE, id")]
 
     def get(self, bank_id: str) -> Bank:
         with self._connect() as db:
@@ -107,3 +107,11 @@ class BankStore:
             if cursor.rowcount != 1:
                 raise RuntimeError("La banque a changé depuis son chargement ; rechargez-la avant de sauvegarder.")
         return updated
+
+    def duplicate(self, bank: Bank, name: str, mode: str) -> Bank:
+        return self.create(Bank.draft(name, mode, bank.focus, bank.camera))
+
+    def delete(self, bank_id: str) -> None:
+        with self._connect() as db:
+            if db.execute("DELETE FROM banks WHERE id=?", (bank_id,)).rowcount != 1:
+                raise KeyError("Cette banque n’existe plus.")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import queue
 import sys
 import threading
 import uuid
@@ -11,21 +10,23 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QColor, QDesktopServices, QFont, QImage, QPainter, QPainterPath
+from PySide6.QtGui import QCloseEvent, QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QScroller, QSizePolicy, QSlider, QSpinBox,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QScrollArea, QScroller, QSizePolicy, QSlider,
     QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionSlider, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from . import resources
 from .banks import BankStore
+from .capture import Sequence, execute_sequence
 from .camera import (GATE, MAX_STABILIZATION_ATTEMPTS, CameraError, CameraReadError,
-                     CameraSelectionError, RAW_BACKEND, _cv2, apply_focus, list_devices, open_device,
+                     CameraSelectionError, _cv2, apply_focus, list_devices, open_device,
                      release_device, resolve_device, validate_color)
 from .config import DEFAULT_BACKEND, FOCUS_MAX, FOCUS_MIN, MODES, Bank, CameraDevice
 from .paths import default_photo_dir
-from .processing import CaptureRenderError, archive_capture, load_source, process_color, raw_demosaic, save_processed
+from .processing import reduce_image
 
 ORANGE = "#FF6F4C"
 ORANGE_DARK = "#B84228"
@@ -40,13 +41,13 @@ QTabBar {{ border: 0; }}
 QTabBar::tab {{ min-height: 48px; min-width: 100px; padding: 0 18px; margin-right: 4px; border: 0;
   border-bottom: 4px solid transparent; color: #59636D; font-size: 17px; }}
 QTabBar::tab:selected {{ color: {INK}; border-bottom-color: {ORANGE}; background: white; font-weight: 600; }}
-QPushButton, QComboBox, QLineEdit, QSpinBox {{ min-height: 48px; min-width: 24px; padding: 0 12px;
+QPushButton, QComboBox, QLineEdit {{ min-height: 48px; min-width: 24px; padding: 0 12px;
   border: 1px solid #D5D9DE; border-radius: 9px; background: white; }}
 QPushButton {{ font-size: 16px; }}
 QPushButton:hover, QComboBox:hover {{ border-color: {ORANGE}; }}
 QPushButton:pressed {{ border: 2px inset #66717C; background: #E5E8EB; padding-top: 2px; }}
 QPushButton:checked {{ border: 2px solid {INK}; background: #FFE1D8; font-weight: 600; }}
-QPushButton:focus, QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{ outline: none; border: 2px solid {INK}; }}
+QPushButton:focus, QComboBox:focus, QLineEdit:focus {{ outline: none; border: 2px solid {INK}; }}
 QPushButton:disabled, QComboBox:disabled {{ color: #66717C; background: #E8E5E1; border: 1px dashed #B8BDC2; }}
 QPushButton#primary {{ color: white; border: 2px solid transparent; background: {ORANGE_DARK}; }}
 QPushButton#primary:hover {{ background: #A63B24; }}
@@ -75,6 +76,10 @@ QLabel#muted {{ color: #59636D; }}
 QLabel#value {{ font-size: 28px; font-weight: 600; color: {INK}; }}
 QLabel#fault {{ color: white; background: #B3261E; border-radius: 8px; padding: 8px 12px; font-weight: 600; }}
 QTextEdit {{ border: 1px solid #D5D9DE; border-radius: 8px; background: white; }}
+QListWidget {{ border: 1px solid #D5D9DE; border-radius: 8px; background: white; }}
+QListWidget::item {{ min-height: 56px; padding: 6px; }}
+QListWidget::item:selected {{ background: #FFE1D8; color: {INK}; }}
+QListWidget::indicator {{ width: 28px; height: 28px; }}
 QScrollBar:vertical {{ width: 24px; }}
 QScrollBar:horizontal {{ height: 24px; }}
 QScrollArea {{ border: 0; }}
@@ -141,7 +146,7 @@ def capture_preview(filename: Path) -> QImage:
         raise OSError(f"Lecture du rendu impossible : {filename}")
     del payload
     if max(image.shape[:2]) > 1600:
-        image = process_color(image, "reduce", 1600)
+        image = reduce_image(image, 1600)
     preview = to_qimage(image)
     del image
     if preview.isNull():
@@ -311,7 +316,8 @@ class PreviewWorker(QThread):
         self.session_id = session_id
         self.device = device
         self._stop = threading.Event()
-        self._focus_queue: queue.SimpleQueue[tuple[int, int]] = queue.SimpleQueue()
+        self._focus_lock = threading.Lock()
+        self._latest_focus: tuple[int, int] | None = None
         self.release_error: str | None = None
         self.terminal_error: str | None = None
 
@@ -323,19 +329,20 @@ class PreviewWorker(QThread):
         self._stop.set()
 
     def set_focus(self, sequence: int, value: int):
-        self._focus_queue.put((sequence, value))
+        with self._focus_lock:
+            if self._latest_focus is None or sequence >= self._latest_focus[0]:
+                self._latest_focus = (sequence, value)
 
     def take_unapplied(self) -> tuple[int, int] | None:
-        latest = None
-        while not self._focus_queue.empty():
-            latest = self._focus_queue.get()
-        return latest
+        with self._focus_lock:
+            latest, self._latest_focus = self._latest_focus, None
+            return latest
 
     def _apply_pending(self, cap, cv2_module):
         latest = self.take_unapplied()
         if latest is None or self._stop.is_set():
             if latest is not None:
-                self._focus_queue.put(latest)
+                self.set_focus(*latest)
             return
         sequence, value = latest
         self.focus_result.emit(self.session_id, sequence, value, apply_focus(cap, value, cv2_module))
@@ -421,96 +428,35 @@ class TaskSignals(QObject):
 
 
 class CaptureTask(QRunnable):
-    def __init__(self, bank: Bank, photo_dir: Path, device: CameraDevice | None = None):
+    def __init__(self, sequence: Sequence, photo_dir: Path):
         super().__init__()
-        self.bank = bank
+        self.sequence = sequence
         self.photo_dir = photo_dir.resolve()
-        self.device = device
         self.signals = TaskSignals()
 
-    @Slot()
-    def run(self):
-        try:
-            from .camera import acquire
-            identifier = str(uuid.uuid4())
-            capture_backend = RAW_BACKEND if MODES[self.bank.mode].raw else DEFAULT_BACKEND
-            self.signals.progress.emit(
-                f"Mode {self.bank.mode} — backend explicitement choisi : {capture_backend} ; "
-                "ouverture, configuration et stabilisation…")
-            result = acquire(self.bank, identifier, device=self.device)
-            self.signals.progress.emit(
-                f"Backend choisi : {result.device.backend} ; disponibilité : oui. "
-                f"Caméra résolue : {result.device.label} ; chemin : {result.device.path}. "
-                f"Dimensions réellement reçues : {result.received_shape}, {result.dtype}.")
-            for label in ("largeur", "hauteur"):
-                setting = result.settings.get(label)
-                if isinstance(setting, dict):
-                    self.signals.progress.emit(
-                        f"Dimensions pilote ({label}) : demandée={setting['requested']} ; "
-                        f"relue après configuration complète={setting['readback']} ; "
-                        f"erreur de relecture={setting.get('readback_error')}. "
-                        "La validation porte sur les dimensions réellement reçues.")
-            self.signals.progress.emit("Sauvegarde : archivage de l’original et production du rendu…")
+    def _completed(self, output: dict):
+        if output.get("image"):
             try:
-                output = archive_capture(result, self.bank, self.photo_dir)
-            except CaptureRenderError as exc:
-                output = exc.archive
+                output["preview"] = capture_preview(output["image"])
+                output["thumbnail"] = output["preview"].scaled(
+                    128, 80, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            except (OSError, cv2.error, MemoryError, RuntimeError) as exc:
                 output["display_error"] = str(exc)
-                self.signals.progress.emit(f"Sauvegarde : original archivé ; erreur de rendu : {exc}")
-            except Exception as exc:
-                self.signals.progress.emit(f"Sauvegarde : erreur : {exc}")
-                raise
-            else:
-                self.signals.progress.emit(
-                    f"Sauvegarde : original archivé, rendu enregistré : {output['image']} ; "
-                    f"manifeste : {output['manifest']}")
-            del result
-            if output.get("image"):
-                self.signals.progress.emit(f"Chargement : lecture et décodage de {output['image']}")
-                try:
-                    output["preview"] = capture_preview(output["image"])
-                except (OSError, cv2.error, MemoryError, RuntimeError) as exc:
-                    output["display_error"] = str(exc)
-                    self.signals.progress.emit(f"Chargement : erreur : {exc}")
-                else:
-                    preview = output["preview"]
-                    self.signals.progress.emit(
-                        f"Chargement : image autonome prête, {preview.width()} × {preview.height()} ; "
-                        "transmission au thread graphique.")
-            self.signals.success.emit(output)
-        except Exception as exc:
-            self.signals.failure.emit(str(exc))
-        finally:
-            self.signals.finished.emit()
-
-
-class ImageTask(QRunnable):
-    def __init__(self, image: np.ndarray, raw: bool, operation: str, value: int):
-        super().__init__()
-        self.image, self.raw, self.operation, self.value = image, raw, operation, value
-        self.signals = TaskSignals()
+        self.signals.success.emit(output)
 
     @Slot()
     def run(self):
         try:
-            if self.raw:
-                if self.operation == "raw-minimal":
-                    result = raw_demosaic(self.image, 0)
-                elif self.operation == "raw-black":
-                    result = raw_demosaic(self.image, 16)
-                else:
-                    result = raw_demosaic(self.image, 16, reference=True)
-            else:
-                result = process_color(self.image, self.operation, self.value)
-            self.signals.success.emit(result)
+            execute_sequence(self.sequence, self.photo_dir,
+                             progress=self.signals.progress.emit, completed=self._completed)
         except Exception as exc:
             self.signals.failure.emit(str(exc))
         finally:
             self.signals.finished.emit()
 
 
-class SourceTask(QRunnable):
-    def __init__(self, filename: str):
+class PhotoTask(QRunnable):
+    def __init__(self, filename: Path):
         super().__init__()
         self.filename = filename
         self.signals = TaskSignals()
@@ -518,30 +464,73 @@ class SourceTask(QRunnable):
     @Slot()
     def run(self):
         try:
-            self.signals.success.emit(load_source(self.filename))
+            self.signals.success.emit(capture_preview(self.filename))
         except Exception as exc:
             self.signals.failure.emit(str(exc))
         finally:
             self.signals.finished.emit()
 
 
-class SaveTask(QRunnable):
-    def __init__(self, image: np.ndarray, source: Path, destination: str):
-        super().__init__()
-        self.image = image
-        self.source = source
-        self.destination = destination
-        self.signals = TaskSignals()
+class BankDialog(QDialog):
+    def __init__(self, bank: Bank, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Nom"))
+        row = QHBoxLayout()
+        self.name = QLineEdit(bank.name)
+        row.addWidget(self.name, 1)
+        keyboard = _button("Clavier")
+        keyboard.clicked.connect(self.enter_name)
+        row.addWidget(keyboard)
+        layout.addLayout(row)
+        layout.addWidget(QLabel(f"Focus manuel : {bank.focus} (consigne)"))
+        layout.addWidget(QLabel("Mode d’acquisition photo"))
+        self.mode = _combo()
+        for key, mode in MODES.items():
+            self.mode.addItem(mode.label, key)
+        self.mode.setCurrentIndex(self.mode.findData(bank.mode))
+        layout.addWidget(self.mode)
+        layout.addWidget(_muted(
+            "Ce choix ne change pas le Preview 720p. La netteté peut différer entre modes : "
+            "la photo constitue le contrôle final."))
+        row = QHBoxLayout()
+        save = _button("Enregistrer", primary=True)
+        save.clicked.connect(self.accept)
+        cancel = _button("Annuler")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(save)
+        row.addWidget(cancel)
+        layout.addLayout(row)
 
-    @Slot()
-    def run(self):
-        try:
-            self.signals.success.emit(str(save_processed(self.image, self.source, self.destination)))
-        except Exception as exc:
-            self.signals.failure.emit(str(exc))
-        finally:
-            self.signals.finished.emit()
+    def enter_name(self):
+        keyboard = TouchKeyboard("Nom de la banque", self.name.text(), parent=self)
+        if keyboard.exec() == QDialog.DialogCode.Accepted:
+            self.name.setText(keyboard.value())
 
+    def accept(self):
+        if not self.name.text().strip():
+            QMessageBox.warning(self, "Nom manquant", "Saisissez un nom de banque.")
+            return
+        super().accept()
+
+
+class BankCheckList(QListWidget):
+    """The entire row toggles a bank, not only the checkbox indicator."""
+
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        self._pressed_item = item
+        self._pressed_state = item.checkState() if item else None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        item = self.itemAt(event.position().toPoint())
+        if event.button() == Qt.MouseButton.LeftButton and item is getattr(self, "_pressed_item", None) and item:
+            item.setCheckState(Qt.CheckState.Unchecked if self._pressed_state == Qt.CheckState.Checked
+                               else Qt.CheckState.Checked)
 
 
 class MainWindow(QMainWindow):
@@ -559,8 +548,7 @@ class MainWindow(QMainWindow):
         self.session_device: CameraDevice | None = None
         self.work_bank = self._empty_draft()
         self.saved_bank: Bank | None = None
-        self._initial_empty_draft = True
-        self._capture_bank_id: str | None = None
+        self._capture_bank_ids: set[str] = set()
         self.preview_worker: PreviewWorker | None = None
         self.preview_token: str | None = None
         self._restart_requested = False
@@ -571,16 +559,11 @@ class MainWindow(QMainWindow):
         self.previous_tab = 0
         self._changing_tab = False
         self._busy_capture = False
-        self._busy_save = False
         self._task: QRunnable | None = None
         self._last_capture: dict | None = None
-        self._source: np.ndarray | None = None
-        self._result: np.ndarray | None = None
-        self._source_path: Path | None = None
-        self._source_raw = False
-        self._comparison_minimal: np.ndarray | None = None
-        self._source_generation = 0
-        self._render_generation = 0
+        self._capture_results: list[dict] = []
+        self._sequence_error: str | None = None
+        self._display_generation = 0
         self._active_tasks: list[QRunnable] = []
         self._closing = False
         self._build()
@@ -609,11 +592,11 @@ class MainWindow(QMainWindow):
         self.logo.setAccessibleName("Data Peanuts")
         self.tabs.setCornerWidget(self.logo, Qt.Corner.TopLeftCorner)
         self.preview_page = self._build_preview()
+        self.banks_page = self._build_banks()
         self.capture_page = self._build_capture()
-        self.processing_page = self._build_processing()
         self.tabs.addTab(self.preview_page, "Preview")
+        self.tabs.addTab(self.banks_page, "Banques")
         self.tabs.addTab(self.capture_page, "Capture")
-        self.tabs.addTab(self.processing_page, "Traitement")
         self.tabs.currentChanged.connect(self._tab_changed)
         outer.addWidget(self.tabs, 1)
         footer = QHBoxLayout()
@@ -698,24 +681,14 @@ class MainWindow(QMainWindow):
         self.work_title.setWordWrap(True)
         self.dirty_label = _muted()
         titles.addWidget(self.work_title)
-        titles.addWidget(self.dirty_label)
         head.addLayout(titles, 1)
         self.preview_details_toggle = _button("Diagnostic")
         self.preview_details_toggle.setToolTip("Explications, identité caméra et diagnostic")
         self.preview_details_toggle.clicked.connect(lambda: self.preview_panel.setCurrentIndex(1))
         head.addWidget(self.preview_details_toggle)
         form.addLayout(head)
-        form.addWidget(QLabel("Mode d’acquisition"))
-        self.mode_combo = _combo()
-        self.mode_combo.setAccessibleName("Mode d’acquisition")
-        self.mode_combo.setToolTip("Mode d’acquisition de la future capture")
-        for key, descriptor in MODES.items():
-            label = (f"RAW · {descriptor.width} × {descriptor.height}" if descriptor.raw
-                     else f"Couleur · {descriptor.width} × {descriptor.height}")
-            self.mode_combo.addItem(label, key)
-            self.mode_combo.setItemData(self.mode_combo.count() - 1, descriptor.label, Qt.ItemDataRole.ToolTipRole)
-        self.mode_combo.activated.connect(self._mode_changed)
-        form.addWidget(self.mode_combo)
+        self.dirty_label.setMinimumHeight(40)
+        form.addWidget(self.dirty_label)
         form.addWidget(QLabel("Focus manuel"))
         focus_row = QHBoxLayout()
         focus_row.setSpacing(6)
@@ -723,7 +696,9 @@ class MainWindow(QMainWindow):
         self.focus_plus = _button("+")
         for button, label in ((self.focus_minus, "Focus manuel −1"), (self.focus_plus, "Focus manuel +1")):
             button.setFixedWidth(56)
-            button.setAutoRepeat(False)
+            button.setAutoRepeat(True)
+            button.setAutoRepeatDelay(450)
+            button.setAutoRepeatInterval(100)
             button.setToolTip(label)
         self.focus_value = QLabel("—")
         self.focus_value.setObjectName("value")
@@ -750,7 +725,7 @@ class MainWindow(QMainWindow):
         form.addWidget(self.focus_slider)
         status_row = QHBoxLayout()
         self.focus_command_status = _muted()
-        self.focus_command_status.setMinimumHeight(40)
+        self.focus_command_status.setMinimumHeight(80)
         self.focus_resend = _button("Renvoyer")
         self.focus_resend.setToolTip("Renvoyer la même consigne de Focus manuel au Preview")
         self.focus_resend.clicked.connect(self.resend_focus)
@@ -759,17 +734,12 @@ class MainWindow(QMainWindow):
         form.addLayout(status_row)
         actions = QHBoxLayout()
         actions.setSpacing(6)
-        self.save_bank_button = _button("Sauvegarder la banque", primary=True)
+        self.save_bank_button = _button("Sauvegarder le focus", primary=True)
         self.save_bank_button.clicked.connect(self.save_work_bank)
-        self.new_bank_button = _button("Nouvelle")
-        self.new_bank_button.setToolTip("Créer une nouvelle banque")
+        self.new_bank_button = _button("Créer une banque avec ce focus")
         self.new_bank_button.clicked.connect(self.create_draft)
-        self.work_name_button = _button("Nommer")
-        self.work_name_button.setToolTip("Renommer la banque de travail")
-        self.work_name_button.clicked.connect(self.rename_work_bank)
         form.addWidget(self.save_bank_button)
         actions.addWidget(self.new_bank_button, 1)
-        actions.addWidget(self.work_name_button, 1)
         form.addLayout(actions)
         return card
 
@@ -812,6 +782,32 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll, 1)
         return card
 
+    def _build_banks(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(_muted(
+            "Configurations de prise de vues de cartes, composants et conditionnements électroniques. "
+            "Une consigne commune ne garantit pas une netteté identique entre modes."))
+        self.bank_list = QListWidget()
+        self.bank_list.setWordWrap(True)
+        QScroller.grabGesture(self.bank_list.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        self.bank_list.setAccessibleName("Banques sauvegardées")
+        layout.addWidget(self.bank_list, 1)
+        actions = QHBoxLayout()
+        self.edit_bank_button = _button("Nom et mode")
+        self.edit_bank_button.clicked.connect(self.edit_bank)
+        self.duplicate_bank_button = _button("Dupliquer")
+        self.duplicate_bank_button.clicked.connect(self.duplicate_bank)
+        self.edit_focus_button = _button("Régler le focus dans Preview")
+        self.edit_focus_button.clicked.connect(self.edit_bank_focus)
+        self.delete_bank_button = _button("Supprimer")
+        self.delete_bank_button.clicked.connect(self.delete_bank)
+        for button in (self.edit_bank_button, self.duplicate_bank_button,
+                       self.edit_focus_button, self.delete_bank_button):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        return page
+
     def _build_capture(self):
         page = QWidget()
         layout = QHBoxLayout(page)
@@ -822,7 +818,6 @@ class MainWindow(QMainWindow):
         left.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         left.setContentsMargins(14, 10, 14, 12)
         left.setSpacing(8)
-        self.capture_selector = _combo()
         capture_heading = QLabel("Capture")
         capture_heading.setObjectName("heading")
         header = QHBoxLayout()
@@ -831,16 +826,38 @@ class MainWindow(QMainWindow):
         self.capture_diagnostic_button.clicked.connect(self.show_diagnostic)
         header.addWidget(self.capture_diagnostic_button)
         left.addLayout(header)
-        self.capture_selector.setAccessibleName("Banque utilisée pour la capture")
-        self.capture_selector.setToolTip("Sélectionner une banque sauvegardée pour Capturer")
-        self.capture_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.capture_selector.setMinimumContentsLength(10)
-        self.capture_selector.activated.connect(self._capture_bank_changed)
+        self.capture_selector = BankCheckList()
+        QScroller.grabGesture(self.capture_selector.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        self.capture_selector.setAccessibleName("Banques à capturer dans l’ordre affiché")
+        self.capture_selector.setWordWrap(True)
+        self.capture_selector.setMinimumHeight(124)
+        self.capture_selector.setMaximumHeight(124)
+        self.capture_selector.itemChanged.connect(self._capture_selection_changed)
         left.addWidget(self.capture_selector)
-        self.capture_summary = QLabel("Sélectionnez une banque complète.")
+        self.capture_summary = QLabel("0 banques sélectionnées = 0 photos")
         self.capture_summary.setWordWrap(True)
         self.capture_summary.setTextFormat(Qt.TextFormat.RichText)
         left.addWidget(self.capture_summary)
+        self.object_id = QLineEdit()
+        self.object_id.setPlaceholderText("ID de l’objet (facultatif)")
+        self.object_id.setAccessibleName("ID de l’objet")
+        self.object_description = QLineEdit()
+        self.object_description.setPlaceholderText("Description de l’objet (facultative)")
+        self.object_description.setAccessibleName("Description de l’objet")
+        for title, field in (("ID de l’objet", self.object_id),
+                             ("Description de l’objet", self.object_description)):
+            row = QHBoxLayout()
+            label = QLabel(title)
+            label.setWordWrap(True)
+            label.setFixedWidth(96)
+            label.setMinimumHeight(48)
+            label.setBuddy(field)
+            row.addWidget(label)
+            row.addWidget(field, 1)
+            left.addLayout(row)
+        self.clear_object_button = _button("Effacer les informations objet")
+        self.clear_object_button.clicked.connect(self.clear_object_information)
+        left.addWidget(self.clear_object_button)
         self.photo_button = _button("Capturer", primary=True)
         self.photo_button.setObjectName("photo")
         self.photo_button.setIcon(resources.squirrel_icon())
@@ -856,8 +873,8 @@ class MainWindow(QMainWindow):
         self.capture_state = _muted("Aucune opération en cours.")
         self.capture_state.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         state_scroll = _scroll_area()
-        state_scroll.setMinimumHeight(72)
-        state_scroll.setMaximumHeight(120)
+        state_scroll.setMinimumHeight(48)
+        state_scroll.setMaximumHeight(60)
         state_body = QWidget()
         state_layout = QVBoxLayout(state_body)
         state_layout.setContentsMargins(0, 0, 4, 0)
@@ -868,79 +885,36 @@ class MainWindow(QMainWindow):
         left.addWidget(state_scroll)
         left.addStretch(1)
         self.photo_path_label = _muted(str(self.photo_dir))
-        left.addWidget(self.photo_path_label)
+        self.photo_path_label.hide()
         folder_row = QHBoxLayout()
         self.choose_folder_button = _button("Dossier…")
         self.choose_folder_button.clicked.connect(self.choose_photo_dir)
         self.open_folder_button = _button("Ouvrir")
         self.open_folder_button.setToolTip("Ouvrir le dossier des photos")
         self.open_folder_button.clicked.connect(self.open_photo_folder)
-        self.open_last_button = _button("Dernière")
-        self.open_last_button.setToolTip("Ouvrir la dernière image")
+        self.open_last_button = _button("Photo")
+        self.open_last_button.setToolTip("Ouvrir la photo sélectionnée")
         self.open_last_button.clicked.connect(self.open_last_image)
         self.open_last_button.setEnabled(False)
         folder_row.addWidget(self.choose_folder_button)
         folder_row.addWidget(self.open_folder_button)
         folder_row.addWidget(self.open_last_button)
         left.addLayout(folder_row)
-        self.preview_link = _button("Préparer une banque dans Preview")
-        self.preview_link.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
-        left.addWidget(self.preview_link)
         controls_scroll = _scroll_area()
         controls_scroll.setFixedWidth(360)
         controls_scroll.setWidget(card)
         layout.addWidget(controls_scroll)
+        results = QVBoxLayout()
         self.capture_image = ImageView("Aucune image capturée")
-        layout.addWidget(self.capture_image, 1)
-        return page
-
-    def _build_processing(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(6)
-        controls = QHBoxLayout()
-        self.open_source_button = _button("Ouvrir une source…")
-        self.open_source_button.setToolTip("Ouvrir un manifeste d’acquisition JSON ou une image PNG/JPEG")
-        self.open_source_button.clicked.connect(self.open_source)
-        controls.addWidget(self.open_source_button)
-        self.operation_combo = _combo()
-        self.operation_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.operation_combo.setMinimumContentsLength(10)
-        self.operation_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.operation_combo.currentIndexChanged.connect(self._operation_changed)
-        controls.addWidget(self.operation_combo, 1)
-        self.operation_value = QSpinBox()
-        self.operation_value.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.operation_value.setRange(-100, 100)
-        self.operation_value.setPrefix("Contraste ")
-        self.operation_value.hide()
-        controls.addWidget(self.operation_value)
-        self.apply_button = _button("Appliquer")
-        self.apply_button.clicked.connect(self.apply_processing)
-        controls.addWidget(self.apply_button)
-        self.save_result_button = _button("Enregistrer sous…", primary=True)
-        self.save_result_button.clicked.connect(self.save_result)
-        self.save_result_button.setEnabled(False)
-        controls.addWidget(self.save_result_button)
-        layout.addLayout(controls)
-        self.source_info = _muted("Ouvrez un manifeste d’acquisition JSON, une image PNG ou JPEG.")
-        layout.addWidget(self.source_info)
-        self.processing_status = _muted("Aucun traitement en cours. Aucun accès caméra depuis cet onglet.")
-        layout.addWidget(self.processing_status)
-        images = QHBoxLayout()
-        source_box = QVBoxLayout()
-        source_box.addWidget(_muted("SOURCE", wrap=False))
-        self.source_label = ImageView("Aucune source ouverte")
-        source_box.addWidget(self.source_label, 1)
-        result_box = QVBoxLayout()
-        self.result_heading = _muted("RÉSULTAT", wrap=False)
-        result_box.addWidget(self.result_heading)
-        self.result_label = ImageView("Choisissez un traitement compatible.")
-        result_box.addWidget(self.result_label, 1)
-        images.addLayout(source_box, 1)
-        images.addLayout(result_box, 1)
-        layout.addLayout(images, 1)
+        results.addWidget(self.capture_image, 1)
+        self.result_list = QListWidget()
+        QScroller.grabGesture(self.result_list.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+        self.result_list.setAccessibleName("Résultats de la séquence")
+        self.result_list.setIconSize(QSize(128, 80))
+        self.result_list.setMaximumHeight(180)
+        self.result_list.currentRowChanged.connect(self.select_result)
+        results.addWidget(self.result_list)
+        layout.addLayout(results, 1)
         return page
 
     def show_diagnostic(self):
@@ -956,9 +930,6 @@ class MainWindow(QMainWindow):
         close.clicked.connect(dialog.accept)
         layout.addWidget(close)
         dialog.exec()
-
-    def _show_image(self, view: ImageView, image: np.ndarray):
-        view.set_array(image)
 
     # --------------------------------------------------------------- cameras
     def refresh_devices(self):
@@ -1069,7 +1040,9 @@ class MainWindow(QMainWindow):
             worker.set_focus(sequence, value)
             self._focus_report = {"seq": sequence, "value": value, "state": "sent"}
         elif self.work_bank.focus is not None:
-            self._focus_report = {"value": self.work_bank.focus, "state": "not_applied"}
+            self._focus_seq += 1
+            worker.set_focus(self._focus_seq, self.work_bank.focus)
+            self._focus_report = {"seq": self._focus_seq, "value": self.work_bank.focus, "state": "sent"}
         else:
             self._focus_report = {"state": "none"}
         worker.frame.connect(self._preview_frame)
@@ -1137,7 +1110,7 @@ class MainWindow(QMainWindow):
             self._set_preview_message(worker.terminal_error)
         if GATE.fault:
             self._enter_fault()
-        if self.tabs.currentIndex() == 1:
+        if self.tabs.currentIndex() == 2:
             self._update_capture_bank()
         if self._closing:
             self._finish_close()
@@ -1179,7 +1152,7 @@ class MainWindow(QMainWindow):
         elif state == "refused":
             text = f"Consigne {value} · refusée par le pilote."
         elif state == "error":
-            text = f"Consigne {value} · erreur : {detail.get('error', 'inconnue')}"
+            text = f"Consigne {value} · erreur pilote (Diagnostic)."
         elif state == "dropped":
             text = f"Consigne {value} non appliquée : session fermée."
         else:
@@ -1206,7 +1179,6 @@ class MainWindow(QMainWindow):
     def _commit_focus(self, value: int):
         value = max(FOCUS_MIN, min(FOCUS_MAX, int(value)))
         self.work_bank = replace(self.work_bank, focus=value)
-        self._initial_empty_draft = False
         self._focus_sync()
         self._update_dirty()
         self._send_focus(value)
@@ -1243,35 +1215,52 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- banks
     @staticmethod
     def _empty_draft() -> Bank:
-        return Bank.draft("Nouvelle banque", "color_720p", None)
+        return Bank.draft("Focus de travail", "color_720p", 0)
 
     def reload_banks(self):
-        """Rebuild both lists while preserving each current selection."""
+        """One stable order is shared by the check list and sequence."""
         banks = self.store.list()
         known = {bank.id for bank in banks}
-        if self._capture_bank_id not in known:
-            self._capture_bank_id = None
-        wanted = ((self.work_selector, self.saved_bank.id if self.saved_bank else None, "Charger une banque…"),
-                  (self.capture_selector, self._capture_bank_id, "Choisir une banque…"))
-        for combo, selected, placeholder in wanted:
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(placeholder, None)
-            for bank in banks:
-                combo.addItem(bank.name, bank.id)
-                focus = "non défini" if bank.focus is None else str(bank.focus)
-                combo.setItemData(combo.count() - 1, f"{MODES[bank.mode].label}\nFocus manuel : {focus}",
-                                  Qt.ItemDataRole.ToolTipRole)
-            combo.setCurrentIndex(max(0, combo.findData(selected)) if selected else 0)
-            combo.blockSignals(False)
+        self._capture_bank_ids.intersection_update(known)
+        selected = self.bank_list.currentItem()
+        selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        self.work_selector.blockSignals(True)
+        self.work_selector.clear()
+        self.work_selector.addItem("Régler une banque…", None)
+        self.bank_list.clear()
+        self.capture_selector.blockSignals(True)
+        self.capture_selector.clear()
+        for position, bank in enumerate(banks, 1):
+            self.work_selector.addItem(bank.name, bank.id)
+            camera = bank.camera.name or bank.camera.path if bank.camera else "non définie"
+            item = QListWidgetItem(
+                f"{bank.name}\n{MODES[bank.mode].label} · Focus {bank.focus}\n"
+                f"Caméra : {camera} · Révision {bank.revision}")
+            item.setData(Qt.ItemDataRole.UserRole, bank.id)
+            if bank.camera:
+                item.setToolTip(
+                    f"{bank.camera.backend} · index résolu à l’ouverture\n"
+                    f"{bank.camera.path or 'Chemin indisponible'}")
+            self.bank_list.addItem(item)
+            if bank.id == selected_id:
+                self.bank_list.setCurrentItem(item)
+            capture_item = QListWidgetItem(
+                f"{position}. {bank.name}\n{bank.mode} · Focus {bank.focus}")
+            capture_item.setData(Qt.ItemDataRole.UserRole, bank.id)
+            capture_item.setFlags(capture_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            capture_item.setCheckState(Qt.CheckState.Checked if bank.id in self._capture_bank_ids
+                                       else Qt.CheckState.Unchecked)
+            self.capture_selector.addItem(capture_item)
+        bank_id = self.saved_bank.id if self.saved_bank else None
+        self.work_selector.setCurrentIndex(max(0, self.work_selector.findData(bank_id)))
+        self.work_selector.blockSignals(False)
+        self.capture_selector.blockSignals(False)
+        self._update_capture_bank()
 
     def refresh_work_controls(self):
-        index = self.mode_combo.findData(self.work_bank.mode)
-        self.mode_combo.blockSignals(True)
-        self.mode_combo.setCurrentIndex(max(0, index))
-        self.mode_combo.blockSignals(False)
         self._focus_sync()
         self._update_dirty()
+        self.save_bank_button.setVisible(self.saved_bank is not None)
 
     def _work_selected(self, index: int):
         """Explicit bank load: syncs the controls, then applies its manual focus."""
@@ -1289,8 +1278,6 @@ class MainWindow(QMainWindow):
             self.reload_banks()
             return
         self.saved_bank = self.work_bank = bank
-        self._initial_empty_draft = False
-        self._capture_bank_id = bank.id
         self.reload_banks()
         self.refresh_work_controls()
         if bank.camera is not None:
@@ -1302,46 +1289,131 @@ class MainWindow(QMainWindow):
                 self.session_device = None
                 self._set_preview_message(f"{exc} Choisissez une caméra.")
             self._populate_cameras()
-        self._ensure_preview()
         if bank.focus is not None:
+            if self.preview_worker and self.preview_worker.device.identity != (
+                    self.session_device.identity if self.session_device else None):
+                self.stop_preview()
             self._send_focus(bank.focus)
+        self._ensure_preview()
 
     def create_draft(self):
-        if not self._resolve_dirty():
+        if not self._focus_can_save(confirm_readback=False):
             return
-        keyboard = TouchKeyboard("Nom de la banque", parent=self)
-        if keyboard.exec() != QDialog.DialogCode.Accepted:
+        draft = Bank.draft("Nouvelle banque", self.work_bank.mode, self.work_bank.focus,
+                           self.session_device)
+        focus_sequence = self._focus_seq
+        dialog = BankDialog(draft, "Créer une banque avec ce focus", self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        name = keyboard.value().strip()
-        if not name:
-            QMessageBox.warning(self, "Nom manquant", "Saisissez un nom de banque.")
+        if (focus_sequence != self._focus_seq or draft.focus != self.work_bank.focus
+                or draft.camera != self.session_device):
+            QMessageBox.warning(self, "Focus modifié", "La consigne ou la caméra a changé. Rouvrez le formulaire.")
             return
-        self.saved_bank = None
-        self._initial_empty_draft = False
-        self.work_bank = Bank.draft(name, self.work_bank.mode, None, self.session_device)
-        self._focus_report = {"state": "none"}
+        if not self._focus_can_save():
+            return
+        try:
+            self.store.create(replace(draft, name=dialog.name.text().strip(),
+                                      mode=dialog.mode.currentData()))
+        except Exception as exc:
+            self._error("Création impossible", exc)
+            return
         self.reload_banks()
-        self.refresh_work_controls()
+        self.notice.setText("Banque créée. Aucune photo déclenchée.")
 
-    def rename_work_bank(self):
-        keyboard = TouchKeyboard("Nom de la banque", self.work_bank.name, parent=self)
-        if keyboard.exec() == QDialog.DialogCode.Accepted:
-            name = keyboard.value().strip()
-            if name:
-                self.work_bank = replace(self.work_bank, name=name)
-                self._initial_empty_draft = False
-                self._update_dirty()
+    def _selected_bank(self) -> Bank | None:
+        item = self.bank_list.currentItem()
+        if item is None:
+            self.notice.setText("Sélectionnez une banque.")
+            return None
+        return self.store.get(item.data(Qt.ItemDataRole.UserRole))
 
-    def _mode_changed(self, index: int):
-        if index < 0:
+    def edit_bank(self):
+        self._bank_form(duplicate=False)
+
+    def duplicate_bank(self):
+        self._bank_form(duplicate=True)
+
+    def _bank_form(self, *, duplicate: bool):
+        try:
+            bank = self._selected_bank()
+            if bank is None:
+                return
+            draft = replace(bank, name=f"{bank.name} — copie") if duplicate else bank
+            dialog = BankDialog(draft, "Dupliquer une banque" if duplicate else "Nom et mode", self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            name, mode = dialog.name.text().strip(), dialog.mode.currentData()
+            if duplicate:
+                self.store.duplicate(bank, name, mode)
+            else:
+                saved = self.store.save(replace(bank, name=name, mode=mode), bank.revision)
+                if self.saved_bank and self.saved_bank.id == saved.id:
+                    self.saved_bank = self.work_bank = saved
+                    self.refresh_work_controls()
+        except Exception as exc:
+            self._error("Modification impossible", exc)
             return
-        self.work_bank = replace(self.work_bank, mode=self.mode_combo.itemData(index))
-        self._initial_empty_draft = False
-        self._update_dirty()
+        self.reload_banks()
+
+    def edit_bank_focus(self):
+        try:
+            bank = self._selected_bank()
+            if bank is None:
+                return
+            index = self.work_selector.findData(bank.id)
+            self._work_selected(index)
+            if self.saved_bank and self.saved_bank.id == bank.id:
+                self.tabs.setCurrentIndex(0)
+        except Exception as exc:
+            self._error("Chargement impossible", exc)
+
+    def delete_bank(self):
+        try:
+            bank = self._selected_bank()
+            if bank is None:
+                return
+            if QMessageBox.question(
+                    self, "Supprimer la banque ?",
+                    f"Supprimer « {bank.name} » ? Les photos, RAW et JSON restent inchangés.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+                return
+            self.store.delete(bank.id)
+            if self.saved_bank and self.saved_bank.id == bank.id:
+                self.saved_bank = None
+                self.work_bank = replace(self.work_bank, id=str(uuid.uuid4()), name="Focus de travail")
+                self.refresh_work_controls()
+        except Exception as exc:
+            self._error("Suppression impossible", exc)
+            return
+        self.reload_banks()
+
+    def _focus_can_save(self, *, confirm_readback: bool = True) -> bool:
+        report = self._focus_report
+        if (self.focus_slider.isSliderDown() or report.get("state") != "accepted"
+                or report.get("seq") != self._focus_seq
+                or report.get("value") != self.work_bank.focus
+                or self.session_device is None or not self._session_active()):
+            QMessageBox.warning(
+                self, "Focus non confirmé",
+                "La consigne courante doit être acceptée dans le Preview actif avant sauvegarde. "
+                "Attendez le pilote ou renvoyez la consigne.")
+            return False
+        reading = report["report"].get("readback")
+        if confirm_readback and (reading is None or reading != self.work_bank.focus):
+            return QMessageBox.question(
+                self, "Limite de vérification du focus",
+                ("Le pilote accepte la consigne mais ne permet pas de la vérifier par relecture. "
+                 if reading is None else f"Le pilote accepte la consigne, mais relit {reading:g}. ")
+                +
+                "La netteté reste à contrôler sur la photo. Enregistrer cette consigne ?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes
+        return True
 
     def _dirty(self) -> bool:
         if self.saved_bank is None:
-            return not self._initial_empty_draft
+            return False
         saved, work = self.saved_bank, self.work_bank
         camera = lambda bank: bank.camera.identity if bank.camera else None  # noqa: E731
         return ((work.name, work.mode, work.focus, camera(work))
@@ -1350,7 +1422,7 @@ class MainWindow(QMainWindow):
     def _update_dirty(self):
         dirty = self._dirty()
         if self.saved_bank is None:
-            label = "Brouillon à sauvegarder" if dirty else "Brouillon vide"
+            label = "Consigne de travail · aucune banque en édition"
         else:
             label = "Modifications à sauvegarder" if dirty else f"Sauvegardée · révision {self.saved_bank.revision}"
         self.work_title.setText(self.work_bank.name)
@@ -1374,36 +1446,27 @@ class MainWindow(QMainWindow):
             return self.save_work_bank()
         if clicked is discard:
             self.work_bank = self.saved_bank or self._empty_draft()
-            self._initial_empty_draft = self.saved_bank is None
             if self.work_bank.focus is not None:
                 self._focus_report = {"value": self.work_bank.focus, "state": "not_applied"}
             else:
                 self._focus_report = {"state": "none"}
             self.refresh_work_controls()
+            self._pending_focus = None
+            if self.work_bank.focus is not None:
+                self._send_focus(self.work_bank.focus)
             return True
         return False
 
     def save_work_bank(self) -> bool:
+        if self.saved_bank is None or not self._focus_can_save():
+            return False
         try:
             self.work_bank.validate()
-            if self.saved_bank is None:
-                saved = self.store.create(self.work_bank)
-            else:
-                answer = QMessageBox.question(
-                    self, "Remplacer la banque sauvegardée ?",
-                    f"La banque « {self.saved_bank.name} » sera remplacée (révision suivante).",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Cancel,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    return False
-                saved = self.store.save(self.work_bank, self.saved_bank.revision)
+            saved = self.store.save(self.work_bank, self.saved_bank.revision)
         except Exception as exc:
             self._error("Sauvegarde de la banque impossible", exc)
             return False
         self.saved_bank = self.work_bank = saved
-        self._initial_empty_draft = False
-        self._capture_bank_id = saved.id
         self.reload_banks()
         self.refresh_work_controls()
         return True
@@ -1413,171 +1476,197 @@ class MainWindow(QMainWindow):
         if self._changing_tab:
             return
         old = self.previous_tab
-        if old == 0 and index != 0 and not self._resolve_dirty():
+        if self._busy_capture or (old == 0 and index != 0 and not self._resolve_dirty()):
             self._changing_tab = True
             self.tabs.setCurrentIndex(old)
             self._changing_tab = False
             return
         self.previous_tab = index
-        if index == 1:
+        if index in (1, 2):
             self.reload_banks()
             self._update_capture_bank()
         self._ensure_preview()
 
     # --------------------------------------------------------------- capture
-    def _capture_bank_changed(self, index: int):
-        self._capture_bank_id = self.capture_selector.itemData(index)
+    def clear_object_information(self):
+        self.object_id.clear()
+        self.object_description.clear()
+
+    def _capture_selection_changed(self, _item=None):
+        if self._busy_capture:
+            return
+        self._capture_bank_ids = {
+            self.capture_selector.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(self.capture_selector.count())
+            if self.capture_selector.item(index).checkState() == Qt.CheckState.Checked}
         self._update_capture_bank()
 
+    def _ordered_capture_banks(self) -> tuple[Bank, ...]:
+        return tuple(bank for bank in self.store.list() if bank.id in self._capture_bank_ids)
+
     def _update_capture_bank(self):
-        bank_id = self._capture_bank_id
-        ready = False
-        try:
-            bank = self.store.get(bank_id) if bank_id else None
-            if bank is None:
-                self.capture_summary.setText("Aucune banque sélectionnée.")
-                self.capture_reason.setText("Choisissez une banque sauvegardée, ou préparez-en une dans Preview.")
-            else:
-                descriptor = MODES[bank.mode]
-                focus = "non défini" if bank.focus is None else f"{bank.focus} / 1023"
-                camera = bank.camera.name or bank.camera.path if bank.camera else "non définie"
-                self.capture_summary.setText(
-                    f"<div style='font-size:20px;font-weight:600'>{_escape(bank.name)}</div>"
-                    f"<div>Mode : {'RAW' if descriptor.raw else 'Couleur'} · "
-                    f"{descriptor.width} × {descriptor.height}</div>"
-                    f"<div>Focus manuel : {focus} (consigne)</div>"
-                    f"<div>Caméra : {_escape(camera)}</div>"
-                    f"<div style='color:#66717C'>Révision {bank.revision}</div>")
-                missing = [label for label, value in (("Focus manuel", bank.focus), ("caméra", bank.camera))
-                           if value is None]
-                if missing:
-                    self.capture_reason.setText(
-                        f"Banque incomplète ({', '.join(missing)}) : complétez-la dans Preview puis sauvegardez.")
-                else:
-                    ready = True
-                    self.capture_reason.setText("Prêt à capturer avec cette banque sauvegardée.")
-                    if self.session_device is None or bank.camera.identity != self.session_device.identity:
-                        ready = False
-                        self.capture_reason.setText(
-                            "Chargez cette banque dans Preview et sélectionnez sa caméra avant de capturer.")
-        except Exception as exc:
-            self.capture_summary.setText("La banque sélectionnée est invalide.")
-            self.capture_reason.setText(str(exc))
+        banks = self._ordered_capture_banks()
+        count = len(banks)
+        self.capture_summary.setText(f"{count} banques sélectionnées = {count} photos")
+        ready = bool(banks) and all(bank.focus is not None and bank.camera is not None for bank in banks)
+        message = "Une photo par banque, dans l’ordre affiché." if ready else "Cochez des banques complètes."
         if GATE.fault:
-            self.capture_reason.setText("Caméra en défaut : redémarrez l’application.")
-            ready = False
-        elif ready and self.preview_worker is not None:
-            self.capture_reason.setText("Libération du Preview en cours ; capture disponible ensuite.")
-            ready = False
-        if self._busy_capture and not GATE.fault:
-            self.capture_reason.setText("Capture en cours — attendez la fin de l’opération.")
-        self.photo_button.setEnabled(ready and not self._busy_capture)
+            ready, message = False, "Caméra en défaut : redémarrez l’application."
+        elif self.preview_worker is not None:
+            ready, message = False, "Libération du Preview en cours…"
+        elif self._busy_capture:
+            ready, message = False, "Séquence en cours."
+        self.capture_reason.setText(message)
+        self.photo_button.setEnabled(ready)
+
+    def _set_capture_busy(self, busy: bool):
+        self._busy_capture = busy
+        for index in (0, 1):
+            self.tabs.setTabEnabled(index, not busy)
+        for widget in (self.capture_selector, self.object_id, self.object_description,
+                       self.clear_object_button, self.choose_folder_button):
+            widget.setEnabled(not busy)
+        self.photo_button.setText("Capture en cours…" if busy else "Capturer")
+        self.capture_progress.setVisible(busy)
+        self._update_capture_bank()
 
     def take_photo(self):
-        if GATE.fault or self.preview_worker is not None or self._busy_capture:
+        if self._busy_capture or GATE.fault or self.preview_worker is not None:
             self._update_capture_bank()
             return
-        if not self._capture_bank_id:
-            self._update_capture_bank()
+        if self.tabs.currentIndex() != 2:
             return
         try:
-            frozen = self.store.get(self._capture_bank_id)
-            if frozen.focus is None or frozen.camera is None:
-                raise ValueError("Cette banque ne définit pas de Focus manuel ou de caméra.")
-            if self.session_device is None or frozen.camera.identity != self.session_device.identity:
-                raise CameraSelectionError(
-                    "La caméra de la banque ne correspond pas au contexte Preview. "
-                    "Chargez cette banque dans Preview et sélectionnez sa caméra avant de capturer.")
+            frozen_banks = self._ordered_capture_banks()
+            if {bank.id for bank in frozen_banks} != self._capture_bank_ids:
+                raise ValueError("Une banque sélectionnée a été supprimée. Actualisez la sélection.")
+            sequence = Sequence(
+                frozen_banks,
+                self.object_id.text() if self.object_id.text().strip() else None,
+                self.object_description.text() if self.object_description.text().strip() else None)
         except Exception as exc:
-            self._error("Banque inutilisable", exc)
+            self._error("Séquence inutilisable", exc)
             return
-        self._busy_capture = True
-        self.photo_button.setEnabled(False)
-        self.photo_button.setText("Capture en cours…")
-        self.capture_reason.setText("Capture en cours — attendez la fin de l’opération.")
-        self.choose_folder_button.setEnabled(False)
-        self.capture_progress.show()
-        self.capture_state.setText("Préparation de la capture…")
-        self._task = CaptureTask(frozen, self.photo_dir, self.session_device)
-        self._task.signals.progress.connect(self._capture_progress)
+        self._display_generation += 1
+        self._capture_results.clear()
+        self._sequence_error = None
+        self.result_list.clear()
+        self._last_capture = None
+        self.open_last_button.setEnabled(False)
+        self.capture_image.setText("Séquence en cours…")
+        self._set_capture_busy(True)
+        self.capture_state.setText("Préparation de la séquence…")
+        self._task = CaptureTask(sequence, self.photo_dir)
+        self._task.signals.progress.connect(self.capture_state.setText)
         self._task.signals.progress.connect(self.preview_details.append)
         self._task.signals.success.connect(self._capture_success)
-        self._task.signals.failure.connect(self._capture_failure)
+        self._task.signals.failure.connect(self._sequence_failure)
         self._task.signals.finished.connect(self._capture_finished)
         self._start_task(self._task)
 
     @Slot(str)
-    def _capture_progress(self, message: str):
-        if message.startswith(("Sauvegarde :", "Chargement :", "Dimensions pilote")):
-            return
-        self.capture_state.setText(
-            "Image acquise ; archivage et rendu en cours…"
-            if message.startswith("Backend choisi :") else message)
-
-    def _start_task(self, task: QRunnable):
-        self._active_tasks.append(task)
-        task.signals.finished.connect(
-            lambda task=task: self._active_tasks.remove(task) if task in self._active_tasks else None
-        )
-        self.pool.start(task)
+    def _sequence_failure(self, message: str):
+        self._sequence_error = message
+        self.preview_details.append(f"Erreur de séquence : {message}")
+        self.capture_state.setText("Séquence interrompue — détails dans Diagnostic.")
 
     @Slot(object)
     def _capture_success(self, output: dict):
+        output = output.copy()
+        image = output.pop("preview", None)
+        thumbnail = output.pop("thumbnail", None)
+        if output.get("image") and (not isinstance(image, QImage) or image.isNull()):
+            output.setdefault("display_error", "Aucune image d’affichage valide reçue.")
+        self._capture_results.append(output)
+        bank = output["bank"]
+        statuses = {"complete": "Enregistrée", "render_error": "RAW conservé · rendu échoué",
+                    "release_error": "Original conservé · défaut caméra",
+                    "failed": "Échec", "not_executed": "Non exécutée"}
+        status = statuses[output["status"]]
+        if output.get("display_error"):
+            status = "Photo enregistrée, affichage indisponible"
+        output["label"] = status
+        item = QListWidgetItem(f"{output['position']}. {bank.name} · {bank.mode}\n{status}")
+        if isinstance(thumbnail, QImage) and not thumbnail.isNull():
+            item.setIcon(QIcon(QPixmap.fromImage(thumbnail)))
+        self.result_list.blockSignals(True)
+        self.result_list.addItem(item)
+        self.result_list.setCurrentItem(item)
+        self.result_list.blockSignals(False)
+        self._display_generation += 1
         self._last_capture = output
-        self.open_last_button.setEnabled(bool(output.get("image") or output.get("original")))
-        release = f"\n⚠ {output['release_error']}" if output.get("release_error") else ""
-        image = output.get("preview")
-        display_error = output.get("display_error", "Aucune image de résultat valide reçue.")
+        self.open_last_button.setEnabled(bool(output.get("image")))
         if isinstance(image, QImage) and not image.isNull():
-            try:
-                self.capture_image.set_qimage(image)
-            except (RuntimeError, MemoryError) as exc:
-                display_error = str(exc)
-                image = None
-        if not isinstance(image, QImage) or image.isNull():
-            message = display_error or "Aucune image de résultat valide reçue."
-            self.capture_state.setText(
-                f"Original enregistré ; rendu/affichage indisponible : {message}\n"
-                f"{output.get('original') or output.get('directory')}{release}")
-            self.preview_details.append(
-                f"Affichage : rendu/affichage indisponible : {message}")
-            if not self.capture_image.has_image():
-                self.capture_image.setText("Rendu couleur indisponible ; original conservé.")
-            return
-        readback = output.get("focus_readback")
-        reading = "relecture indisponible" if readback is None else f"relecture {readback:g}"
-        self.capture_state.setText(
-            f"Capture enregistrée : {output['directory']}\n"
-            f"Focus manuel {output['focus_requested']} — commande acceptée, {reading} ; "
-            f"netteté non vérifiée.{release}"
-        )
+            self.capture_image.set_qimage(image)
+        else:
+            self.capture_image.setText(status)
         self.preview_details.append(
-            f"Affichage : résultat installé dans Capture, {image.width()} × {image.height()}, "
-            "proportions conservées.")
+            f"Photo {output['position']} · {bank.name} · {status}\n"
+            f"{output.get('error') or output.get('display_error') or output.get('manifest', '')}")
 
-    @Slot(str)
-    def _capture_failure(self, message: str):
-        self._preview_failed = True
-        self.preview_details.append(f"Échec capture : {message}. Utilisez « Relancer le Preview ».")
-        self.capture_state.setText(f"Échec : {message}")
-        QMessageBox.critical(self, "Capture impossible", message)
+    def select_result(self, row: int):
+        self._display_generation += 1
+        generation = self._display_generation
+        if not 0 <= row < len(self._capture_results):
+            return
+        output = self._capture_results[row]
+        self._last_capture = output
+        self.open_last_button.setEnabled(bool(output.get("image")))
+        self.capture_image.setText(output["label"])
+        if not output.get("image"):
+            return
+        task = PhotoTask(output["image"])
+        task.signals.success.connect(
+            lambda image: self.capture_image.set_qimage(image)
+            if generation == self._display_generation else None)
+        task.signals.failure.connect(
+            lambda error: self._display_failure(error, generation))
+        self._start_task(task)
+
+    def _display_failure(self, error: str, generation: int):
+        self.preview_details.append(f"Affichage : {error}")
+        if generation == self._display_generation:
+            self.capture_image.setText("Photo enregistrée, affichage indisponible")
+            row = self.result_list.currentRow()
+            if 0 <= row < len(self._capture_results):
+                output = self._capture_results[row]
+                output["display_error"] = error
+                output["label"] = "Photo enregistrée, affichage indisponible"
+                bank = output["bank"]
+                self.result_list.item(row).setText(
+                    f"{output['position']}. {bank.name} · {bank.mode}\n{output['label']}")
 
     @Slot()
     def _capture_finished(self):
-        self._busy_capture = False
-        self.photo_button.setText("Capturer")
-        self.capture_progress.hide()
-        self.choose_folder_button.setEnabled(True)
+        self.reload_banks()
+        self._set_capture_busy(False)
+        counts = {status: sum(item["status"] == status for item in self._capture_results)
+                  for status in ("complete", "failed", "render_error", "release_error", "not_executed")}
+        self.capture_state.setText(
+            f"{counts['complete']} réussie(s) · "
+            f"{counts['failed'] + counts['render_error'] + counts['release_error']} en échec · "
+            f"{counts['not_executed']} non exécutée(s).")
+        if self._sequence_error:
+            self.capture_state.setText("Séquence interrompue — détails dans Diagnostic.")
         if GATE.fault:
             self._enter_fault()
-        self._update_capture_bank()
         if self._closing:
             self._finish_close()
-            return
+
+    def _start_task(self, task: QRunnable):
+        self._active_tasks.append(task)
+        task.signals.finished.connect(lambda task=task: self._task_finished(task))
+        self.pool.start(task)
+
+    def _task_finished(self, task: QRunnable):
+        if task in self._active_tasks:
+            self._active_tasks.remove(task)
+        if self._closing:
+            self._finish_close()
 
     def _enter_fault(self):
         message = (f"Défaut caméra : {GATE.fault} La caméra n’est plus considérée comme disponible. "
-                   "Redémarrez l’application. Les photos acquises sont conservées ; Traitement reste utilisable.")
+                   "Redémarrez l’application. Les photos acquises sont conservées.")
         self.fault_banner.setText(message)
         self.fault_banner.show()
         for widget in (self.camera_combo, self.refresh_cameras_button, self.restart_preview_button,
@@ -1593,194 +1682,22 @@ class MainWindow(QMainWindow):
             self.photo_path_label.setText(str(self.photo_dir))
 
     def open_last_image(self):
-        if self._last_capture:
-            filename = self._last_capture.get("image") or self._last_capture["original"]
+        if self._last_capture and self._last_capture.get("image"):
+            filename = self._last_capture["image"]
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(filename)))
 
     def open_photo_folder(self):
-        self.photo_dir.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.photo_dir)))
-
-    # ------------------------------------------------------------ processing
-    def open_source(self):
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Ouvrir une acquisition ou une image", str(self.photo_dir),
-            "Acquisition / images (*.json *.png *.jpg *.jpeg);;Tous les fichiers (*)")
-        if not filename:
-            return
-        self._source_generation += 1
-        generation = self._source_generation
-        self._render_generation += 1
-        self.open_source_button.setEnabled(False)
-        self.processing_status.setText("Lecture du fichier enregistré… aucun accès caméra.")
-        task = SourceTask(filename)
-        task.signals.success.connect(lambda loaded, generation=generation:
-                                     self._source_loaded(loaded, generation))
-        task.signals.failure.connect(lambda message, generation=generation:
-                                     self._source_failed(message, generation))
-        task.signals.finished.connect(lambda: self.open_source_button.setEnabled(True))
-        self._start_task(task)
-
-    def _source_failed(self, message: str, generation: int):
-        if generation == self._source_generation:
-            self.processing_status.setText(f"Ouverture impossible : {message}")
-            self._error("Ouverture impossible", message)
-
-    def _source_loaded(self, loaded, generation: int):
-        if generation != self._source_generation:
-            return
-        image, raw, source = loaded
-        self._source, self._source_raw, self._source_path = image, raw, Path(source)
-        self.processing_status.setText("Source chargée depuis le disque ; caméra inactive.")
-        self._result = None
-        self._comparison_minimal = None
-        self.save_result_button.setEnabled(False)
-        self.source_info.setText(
-            f"{Path(source).name} · {'Bayer brut — pas une photo couleur' if raw else 'image couleur'}"
-        )
-        self.source_label.setText("Préparation de l’aperçu source…")
-        self.result_label.setText("Choisissez un traitement compatible.")
-        self._populate_operations()
-        if raw:
-            self.source_label.setText("Calcul du rendu minimal de comparaison…")
-            task = ImageTask(image.copy(), True, "raw-minimal", 0)
-            task.signals.success.connect(lambda result, generation=generation:
-                                          self._minimal_source_ready(result, generation))
-            task.signals.failure.connect(lambda message, generation=generation:
-                                          self._minimal_source_failure(message, generation))
-            self._start_task(task)
-            self.apply_button.setEnabled(False)
-            self.processing_status.setText("Traitement en cours…")
-        else:
-            self._show_image(self.source_label, image)
-            self.apply_processing()
-
-    def _minimal_source_ready(self, image: np.ndarray, generation: int):
-        if generation != self._source_generation:
-            return
-        self._comparison_minimal = image
-        self.source_info.setText(
-            f"{self._source_path.name} · Rendu minimal de comparaison ; le Bayer brut n’est pas une photo couleur."
-        )
-        self._show_image(self.source_label, image)
-        if self.operation_combo.currentData() == "raw-minimal":
-            self._result = image
-            self._show_image(self.result_label, image)
-            self.save_result_button.setEnabled(True)
-            self.processing_status.setText("Traitement terminé. La source enregistrée reste inchangée.")
-            self.apply_button.setEnabled(True)
-        else:
-            self.apply_processing()
-
-    def _minimal_source_failure(self, message: str, generation: int):
-        if generation == self._source_generation:
-            self.source_label.setText(f"Rendu minimal indisponible : {message}")
-            self.apply_button.setEnabled(True)
-
-    def _populate_operations(self):
-        self.operation_combo.blockSignals(True)
-        self.operation_combo.clear()
-        if self._source_raw:
-            self.operation_combo.addItem("Dématriçage minimal — rendu illustratif", "raw-minimal")
-            self.operation_combo.addItem("Niveau noir + dématriçage", "raw-black")
-            self.operation_combo.addItem("Rendu de référence + correction couleur", "raw-reference")
-            self.result_heading.setText("RÉSULTAT · RENDU COULEUR")
-        else:
-            self.operation_combo.addItem("Niveaux de gris", "gray")
-            self.operation_combo.addItem("Contraste logiciel", "contrast")
-            self.operation_combo.addItem("Réduction avec proportions conservées", "reduce")
-            self.result_heading.setText("RÉSULTAT")
-        self.operation_combo.blockSignals(False)
-        self._operation_changed()
-
-    def _operation_changed(self, _index: int = 0):
-        operation = self.operation_combo.currentData()
-        enabled = operation in ("contrast", "reduce")
-        self.operation_value.setEnabled(enabled)
-        self.operation_value.setVisible(enabled)
-        if operation != getattr(self, "_last_operation", None):
-            if operation == "contrast":
-                self.operation_value.setRange(-100, 100)
-                self.operation_value.setPrefix("Contraste ")
-                self.operation_value.setValue(0)
-            elif operation == "reduce":
-                self.operation_value.setRange(1, 12000)
-                self.operation_value.setPrefix("Dimension max. ")
-                self.operation_value.setValue(1200)
-        self._last_operation = operation
-
-    def apply_processing(self, *_args):
-        if self._source is None:
-            return
-        self._render_generation += 1
-        generation = self._render_generation
-        operation = self.operation_combo.currentData()
-        self.apply_button.setEnabled(False)
-        value = self.operation_value.value()
-        if operation == "reduce" and value == 0:
-            value = 1200
-            self.operation_value.setValue(value)
-        task = ImageTask(self._source, self._source_raw, operation, value)
-        task.signals.success.connect(lambda image, generation=generation:
-                                     self._processing_success(image, generation))
-        task.signals.failure.connect(lambda message, generation=generation:
-                                     self._processing_failure(message, generation))
-        task.signals.finished.connect(lambda generation=generation:
-                                      self.apply_button.setEnabled(True)
-                                      if generation == self._render_generation else None)
-        self._start_task(task)
-
-    def _processing_success(self, image: np.ndarray, generation: int):
-        if generation != self._render_generation:
-            return
-        self._result = image
-        self._show_image(self.result_label, image)
-        self.save_result_button.setEnabled(True)
-
-    def _processing_failure(self, message: str, generation: int):
-        if generation != self._render_generation and generation != self._source_generation:
-            return
-        self.result_label.setText(f"Traitement impossible : {message}")
-        self.save_result_button.setEnabled(False)
-        self.processing_status.setText(f"Échec du traitement : {message}")
-
-    def save_result(self):
-        if self._result is None or self._source_path is None:
-            return
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Enregistrer une nouvelle image", str(self._source_path.with_name(self._source_path.stem + "-traitee.png")),
-            "PNG (*.png);;JPEG (*.jpg *.jpeg)")
-        if not filename:
-            return
-        self.save_result_button.setEnabled(False)
-        self._busy_save = True
-        self.processing_status.setText("Enregistrement du résultat… la source ne sera pas remplacée.")
-        task = SaveTask(self._result, self._source_path, filename)
-        task.signals.success.connect(self._save_success)
-        task.signals.failure.connect(lambda message: self._error("Enregistrement impossible", message))
-        task.signals.failure.connect(lambda message: self.processing_status.setText(
-            f"Échec d’enregistrement : {message}"))
-        task.signals.finished.connect(self._save_finished)
-        self._start_task(task)
-
-    @Slot(str)
-    def _save_success(self, filename: str):
-        self.source_info.setText(f"Nouvelle image enregistrée : {filename} — l’original est conservé.")
-        self.processing_status.setText(f"Nouvelle image enregistrée : {filename}.")
-
-    def _save_finished(self):
-        self._busy_save = False
-        self.save_result_button.setEnabled(self._result is not None)
-        if self._closing:
-            self._finish_close()
+        directory = (self._last_capture.get("directory") if self._last_capture else None) or self.photo_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
     @staticmethod
     def _error(title, error):
         QMessageBox.critical(QApplication.activeWindow(), title, str(error))
 
     def closeEvent(self, event: QCloseEvent):
-        if self._busy_capture or self._busy_save:
-            activity = "capture caméra" if self._busy_capture else "enregistrement du résultat"
+        if self._busy_capture:
+            activity = "séquence de capture"
             answer = QMessageBox.question(
                 self, "Opération en cours",
                 f"La fermeture attend la fin de l’opération ({activity}).",
@@ -1794,19 +1711,15 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         self._ensure_preview()
-        if self._busy_capture or self._busy_save or self.preview_worker is not None:
+        if self._busy_capture or self.preview_worker is not None or self._active_tasks:
             event.ignore()
             return
         event.accept()
 
     def _finish_close(self):
-        if self.preview_worker is not None or self._busy_capture or self._busy_save:
+        if self.preview_worker is not None or self._busy_capture or self._active_tasks:
             return
         self.close()
-
-
-def _escape(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def main() -> int:

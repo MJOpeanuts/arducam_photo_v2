@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -284,6 +285,7 @@ class Acquisition:
     released: bool
     settings: dict[str, object] = field(default_factory=dict)
     release_error: str | None = None
+    captured_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 def _setup(cap, mode: str, focus: int, cv2):
